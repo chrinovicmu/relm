@@ -1,4 +1,5 @@
 #include <asm/processor-flags.h>
+#include <cerrno>
 #include <linux/slab.h>
 #include <linux/gfp.h>
 #include <linux/mm.h>
@@ -22,6 +23,12 @@
 #include <include/vmexit.h>
 #include <include/vmcs_state.h>
 #include <utils/utils.h>
+
+static DEFINE_PER_CPU(struct host_cpu * relm_per_cpu_hcpu); 
+struct host_cpu *relm_get_per_cpu_hcpu(void)
+{
+    return this_cpu_read(relm_per_cpu_hcpu); 
+}
 
 static int relm_setup_vmxon_region(struct host_cpu *hcpu);
 static int relm_setup_vmcs_region(struct vcpu *vcpu);
@@ -53,7 +60,6 @@ static void populate_msr_store_area(struct msr_entry *area, size_t count,
 static inline bool relm_vcpu_io_bitmap_enabled(struct vcpu *vcpu);
 static inline bool relm_vcpu_msr_bitmap_enabled(struct vcpu *vcpu);
 static inline unsigned int msr_area_order(size_t bytes);
-
 
 const uint32_t relm_vmexit_msr_indices[] = {
     MSR_IA32_EFER,
@@ -95,7 +101,7 @@ inline bool relm_vmx_support(void)
         : "memory"
     );  
 
-    pr_info("RELM: CPUID(1) ECX=0x%x\n", ecx);
+    PDEBUG("RELM: CPUID(1) ECX=0x%x\n", ecx);
 
     return (ecx & (1 << 5)) != 0;  /* VMX bit */
 }
@@ -116,45 +122,163 @@ inline void relm_enable_vmx_operation(void)
     /* Optional verification (for debug) */
     asm volatile("mov %%cr4, %0" : "=r"(cr4));
     if (!(cr4 & (1UL << 13)))
-        pr_err("RELM: VMXE bit not set in CR4!\n");
+        pr_err("RELM: CR4.VMXE did not set on CPU %d\n");
 
     pr_info("RELM: VMX operation enabled\n"); 
 }
 
 bool relm_setup_feature_control(void)
 {
-    uint64_t fc; 
+    uint64_t fc;
 
-    fc = __rdmsr1(MSR_IA32_FEATURE_CONTROL); 
+    fc = __rdmsr1(MSR_IA32_FEATURE_CONTROL);
 
-    const uint64_t required = 
-        IA32_FEATURE_CONTROL_LOCKED | 
+    const uint64_t required =
+        IA32_FEATURE_CONTROL_LOCKED |
         IA32_FEATURE_CONTROL_MSR_VMXON_ENABLE_OUTSIDE_SMX;
 
-    /* If MSR is locked, verify VMXON is allowed */ 
+    /* MSR already locked — just validate. */
     if (fc & IA32_FEATURE_CONTROL_LOCKED) {
         if (!(fc & IA32_FEATURE_CONTROL_MSR_VMXON_ENABLE_OUTSIDE_SMX)) {
-            pr_err("RELM: Feature control locked but VMXON not enabled\n"); 
-            return false; 
+            pr_err("RELM: CPU%d: feature control locked, VMXON not enabled\n",
+                   smp_processor_id());
+            return false;
         }
-        return true; 
+        return true;
     }
 
-    /* Lock MSR and set required bits */
+    uint64_t new_val = fc | required;
     __wrmsr(MSR_IA32_FEATURE_CONTROL,
-             (uint32_t)(fc | required & 0xFFFFFFFF),
-             (uint32_t)((fc | required >> 32) & 0xFFFFFFFF)); 
+            (uint32_t)(new_val & 0xFFFFFFFFULL),
+            (uint32_t)((new_val >> 32) & 0xFFFFFFFFULL));
 
-    fc = __rdmsr1(MSR_IA32_FEATURE_CONTROL); 
+    fc = __rdmsr1(MSR_IA32_FEATURE_CONTROL);
     if ((fc & required) != required) {
-        pr_err("RELM: Failed to lock/setup IA32_FEATURE_CONTROL MSR\n"); 
-        return false; 
+        pr_err("RELM: CPU%d: failed to configure IA32_FEATURE_CONTROL\n",
+               smp_processor_id());
+        return false;
     }
 
     return true;
 }
 
-/*pin vcpu thread to a specific physical host cpu for cpu affinity*/ 
+struct vmx_enable_work{
+    atomic_t failed_cpus; 
+}; 
+
+static void relm_vmx_enable_cpu(void *arg)
+{
+    struct vmx_enable_work *work = arg; 
+    int cpu = smp_processor_id(); 
+    struct host_cpu *host_cpu = per_cpu(relm_per_cpu_hcpu, cpu);
+
+    if(!host_cpu)
+    {
+        pr_err("RELM: CPU%d : no host_cpu pre_allocated, cannot enable VMX\n", 
+               cpu); 
+        atomic_inc(&work->failed_cpus); 
+        return; 
+    }
+
+    relm_enable_vmx_operation(); 
+
+    if(!relm_setup_feature_control()){
+        pr_err("RELM: CPU%d: feature control setup failed\n", cpu); 
+        atomic_inc(&work->failed_cpus); 
+        return; 
+    }
+
+    if(relm_vmxon(hcpu) != 0)
+    {
+        pr_err("RELM: CPU%d: feature control setup failed\n", cpu); 
+        atomic_inc(&work->failed_cpus); 
+        return; 
+    }
+
+    pr_info("RELM: CPU%d: VMX enabled successfully\n", cpu);
+
+}
+
+static void relm_vmx_disable_cpu(void *unused)
+{
+    int cpu = smp_processor_id();
+    struct host_cpu *hcpu = per_cpu(relm_per_cpu_hcpu, cpu);
+
+    if (!hcpu)
+        return;
+
+    if (relm_vmxoff(hcpu) != 0)
+        pr_err("RELM: CPU%d: VMXOFF failed\n", cpu);
+
+    uint64_t cr4;
+    __asm__ __volatile__
+        ("mov %%cr4, %0"
+        : "=r"(cr4));
+
+    cr4 &= ~(1UL << 13); /* clear VMXE */
+    __asm__ __volatile__(
+        "mov %0, %%cr4" 
+        :: "r"(cr4) : "memory");
+}
+
+int relm_enable_vmx_on_all_cpus(void)
+{
+    struct vmx_enable_work work; 
+    struct host_cpu *hcpu; 
+    int cpu; 
+    int ret = 0; 
+
+    atomic_set(&work.failed_cpus, 0); 
+
+    pr_info("RELM: Enabling VMX on all %d online CPUs\n",
+            num_online_cpus());
+
+    for_each_online(cpu){
+
+        hcpu = kzalloc(sizeof(*hcpu), GFP_KERNEL);
+        if(!hcpu)
+        {
+            pr_err("RELM: CPU%d: failed to allocate host_cpu\n", 
+                   cpu); 
+            ret = -ENOMEM; 
+            goto _cleanup; 
+        }
+
+        hcpu->logical_cpu_id = cpu; 
+        spin_lock_init(&hcpu->lock); 
+
+        if(relm_setup_vmxon_region(hcpu) != 0)
+        {
+            pr_err("RELM: CPU%D: failed to allocate VMXON region\n", 
+                   cpu); 
+            kfree(hcpu); 
+            ret = -ENOMEM; 
+            goto _cleanup; 
+        }
+
+        /*store in per-cpu varaible. the IPI handler reads this.*/ 
+        per_cpu(relm_per_cpu_hcpu, cpu) = hcpu;  
+    }
+
+    on_each_cpu(relm_vmx_enable_cpu, &work, 1); 
+
+    if(atomic_read(&work.failed_cpus) > 0)
+    {
+        pr_err("RELM: VMX enable failed on %d CPU(s)\n", 
+               atomic_read(&work.failed_cpus); 
+        ret = -EIO; 
+        goto _cleanup; 
+    }
+
+    pr_info("RELM: VMX enabled\n on all CPUS\n"); 
+
+    return 0; 
+
+}
+
+/*pin vcpu thread to a specific physical host cpu for cpu affinity
+ * disabled for now as we are wnablign VMX on all cpu cores 
+  
 int relm_vcpu_pin_to_cpu(struct vcpu *vcpu, int target_cpu_id)
 {
     int ret; 
@@ -191,6 +315,15 @@ int relm_vcpu_pin_to_cpu(struct vcpu *vcpu, int target_cpu_id)
     return ret; 
 }
 
+
+void relm_vcpu_unpin_and_stop(struct vcpu *vcpu)
+{
+    set_cpus_allowed_ptr(vcpu->host_task, cpu_online_mask); 
+    kthread_stop(vcpu->host_task); 
+}
+
+*/ 
+
 /*IO bitmap bit in the execution controls need to be set in order to use io bimaps*/ 
 static inline bool relm_vcpu_io_bitmap_enabled(struct vcpu *vcpu)
 {
@@ -206,12 +339,6 @@ static inline bool relm_vcpu_msr_bitmap_enabled(struct vcpu *vcpu)
 static inline bool relm_vcpu_ept_enabled(struct vcpu *vcpu)
 {
     return (vcpu->controls.secondary_proc & VMCS_PROC2_ENABLE_EPT) != 0;
-}
-
-void relm_vcpu_unpin_and_stop(struct vcpu *vcpu)
-{
-    set_cpus_allowed_ptr(vcpu->host_task, cpu_online_mask); 
-    kthread_stop(vcpu->host_task); 
 }
 
 static int relm_setup_vmxon_region(struct host_cpu *hcpu)

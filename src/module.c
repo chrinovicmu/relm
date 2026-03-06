@@ -64,7 +64,7 @@ static int __init relm_module_init(void)
     /*load guest code into VM memory
      * copy to guest physicall address 0x1000
      * we use 0x100(4kb) to leave the first page for the real-mode IVT/BIOS data
-     */ 
+     
 
     PDEBUG("RELM: Loading guest code (%zu bytes) to GPA 0x1000...\n", 
            sizeof(guest_code));  
