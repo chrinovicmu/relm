@@ -1,5 +1,4 @@
 #include <asm/processor-flags.h>
-#include <cerrno>
 #include <linux/slab.h>
 #include <linux/gfp.h>
 #include <linux/mm.h>
@@ -170,9 +169,9 @@ static void relm_vmx_enable_cpu(void *arg)
 {
     struct vmx_enable_work *work = arg; 
     int cpu = smp_processor_id(); 
-    struct host_cpu *host_cpu = per_cpu(relm_per_cpu_hcpu, cpu);
+    struct host_cpu *hcpu= per_cpu(relm_per_cpu_hcpu, cpu);
 
-    if(!host_cpu)
+    if(!hcpu)
     {
         pr_err("RELM: CPU%d : no host_cpu pre_allocated, cannot enable VMX\n", 
                cpu); 
@@ -221,7 +220,7 @@ static void relm_vmx_disable_cpu(void *unused)
         :: "r"(cr4) : "memory");
 }
 
-int relm_enable_vmx_on_all_cpus(void)
+int relm_vmx_enable_on_all_cpus(void)
 {
     struct vmx_enable_work work; 
     struct host_cpu *hcpu; 
@@ -264,7 +263,7 @@ int relm_enable_vmx_on_all_cpus(void)
 
     if(atomic_read(&work.failed_cpus) > 0)
     {
-        pr_err("RELM: VMX enable failed on %d CPU(s)\n", 
+        pr_err("RELM: VMX enable failed on %d CPU(s)\n"), 
                atomic_read(&work.failed_cpus); 
         ret = -EIO; 
         goto _cleanup; 
@@ -276,11 +275,11 @@ int relm_enable_vmx_on_all_cpus(void)
 
 _cleanup:
 
-    relm_vmx_disable_vmx_on_all_cpus(); 
+    relm_vmx_disable_on_all_cpus(); 
     return ret; 
 }
 
-void relm_vmx_disable_vmx_on_all_cpus(void)
+void relm_vmx_disable_on_all_cpus(void)
 {
     int cpu; 
     struct host_cpu *hcpu; 
@@ -1279,9 +1278,6 @@ _out_free_vmcs:
 _out_free_host_stack:
     free_pages((unsigned long)vcpu->host_stack, HOST_STACK_ORDER);
 
-_out_free_host_cpu:
-    relm_destroy_host_cpu(vcpu->hcpu); 
-    
 _out_free_vcpu:
     kfree(vcpu);
     return NULL; 

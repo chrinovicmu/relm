@@ -30,17 +30,16 @@ static int __init relm_module_init(void)
         pr_err("RELM: VMX is not surppoted on hardware"); 
         return -1; 
     }
-    pr_info("RELM: VMX is surppoted\n"); 
+    PDEBUG("RELM: VMX is surppoted\n"); 
 
-    relm_enable_vmx_operation();
-
-    if(!relm_setup_feature_control())
+    ret = relm_vmx_enable_on_all_cpus();
+    if (ret) 
     {
-        pr_err("RELM: failed to setup feature control MSR\n"); 
-        return -1; 
+        pr_err("RELM: Failed to enable VMX on all CPUs: %d\n", ret);
+        return ret;
     }
-    pr_info("RELM: feature control is set\n"); 
-
+    pr_info("RELM: VMX enabled on all CPUs\n");
+/*
     my_vm = relm_create_vm(vm_id, "Test-VM-01", (uint64_t)RELM_VM_GUEST_RAM_SIZE); 
     if(!my_vm)
     {

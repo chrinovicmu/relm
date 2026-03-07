@@ -13,7 +13,6 @@
 #include <include/vmx_ops.h>
 #include <include/vmexit.h>
 #include <include/vmcs_state.h>
-#include <string.h>
 #include <utils/utils.h>
 
 DEFINE_PER_CPU(struct vcpu *, current_vcpu);
@@ -801,15 +800,6 @@ static int relm_vcpu_loop(void *data)
 
     PDEBUG("-------------------------------------------------"); 
 
-    ret = relm_vcpu_pin_to_cpu(vcpu, vcpu->target_cpu_id);
-    if(ret < 0)
-    {
-        pr_err("RELM: Failed to pin VCPU %u to CPU %d\n",
-               vcpu->vpid, vcpu->target_cpu_id);
-        return -1; 
-//        goto _out_clear_vcpu; 
-    }
- 
     ret = relm_init_vmcs_state(vcpu);
     if(ret < 0)
     {
