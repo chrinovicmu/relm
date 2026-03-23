@@ -71,6 +71,10 @@ struct relm_vm;
 #define APIC_LVT_MASKED                 (1ULL << 16)
 #define APIC_LVT_RESET_VALUE            APIC_LVT_MASKED
 
+#define APIC_LVT_TIMER_ONESHOT      (0U << 17)
+#define APIC_LVT_TIMER_PERIODIC     (1U << 17)
+#define APIC_LVT_TIMER_TSCDEADLINE  (2U << 17)
+#define APIC_LVT_VECTOR_MASK        0x000000FFU
 /* ICR fields */
 #define APIC_ICR_VECTOR_MASK            0x000000FFU
 #define APIC_ICR_DELIVERY_MASK          0x00000700U
@@ -83,6 +87,8 @@ struct relm_vm;
 #define APIC_ICR_TRIGGER_LEVEL          (1U << 15)
 #define APIC_ICR_SHORTHAND_MASK         0x000C0000U
 #define APIC_ICR_SHORTHAND_NONE         0x00000000U
+#define APIC_ICR_SHORTHAND_ALL_INCL     0x00080000U  /* 10b: all CPUs incl self */
+#define APIC_ICR_SHORTHAND_ALL_EXCL     0x000C0000U  /* 11b: all CPUs excl self */
 #define APIC_ICR_SHORTHAND_SELF         0x00040000U
 #define APIC_ICR_DEST_SHIFT             24
 
@@ -147,7 +153,7 @@ struct virt_apic{
     uint32_t timer_icr; 
     uint32_t timer_dcr; 
 
-    enum virt_apic_timer_mode; 
+    enum virt_apic_timer_mode timer_mode; ; 
     uint64_t timer_start_ns; 
     uint64_t timer_deadline_tsc; 
 

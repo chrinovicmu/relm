@@ -4,7 +4,7 @@
 #include <linux/smp.h>
 #include <linux/ktime.h>
 #include <linux/spinlock.h>
- 
+#include <asm/io.h>
 #include <include/vmx.h>
 #include <include/vm.h>
 #include <include/vmx_ops.h>
