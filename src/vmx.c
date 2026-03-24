@@ -20,6 +20,7 @@
 #include <include/ept.h>
 #include <include/vmx_ops.h>
 #include <include/vmexit.h>
+#include <include/apic.h>
 #include <include/vmcs_state.h>
 #include <utils/utils.h>
 
@@ -1172,6 +1173,14 @@ struct vcpu *relm_vcpu_alloc_init(struct relm_vm *vm, int vpid)
     vcpu->vm = vm;
     vcpu->vpid = vpid;
     vcpu->state = VCPU_STATE_UNINITIALIZED; 
+    
+    if(relm_apic_alloc(&vcpu->apic) != 0)
+    {
+        pr_err("RELM: VCPU%d: failed to allocate APIC pages\n", vpid);
+        kfree(vcpu);
+        return NULL;
+    }
+
     vcpu->halted = false; 
     vcpu->launched = 0; 
 
@@ -1253,9 +1262,14 @@ struct vcpu *relm_vcpu_alloc_init(struct relm_vm *vm, int vpid)
         goto _out_free_msr_bitmap; 
     }
 
+    relm_apic_init(&vcpu->apic, (uint8_t)VPID_TO_INDEX(vpid)); 
+    
+    vcpu->state = VCPU_STATE_INITIALIZED; 
+
     pr_info("RELM: VCPU%d: Phase 1 complete - all memory allocated"
             " (stack=%p rsp=0x%llx vmcs_pa=0x%llx)\n",
             vpid, vcpu->host_stack, vcpu->host_rsp, vcpu->vmcs_pa);
+
     return vcpu; 
 
 _out_free_msr_bitmap:
@@ -1271,10 +1285,13 @@ _out_free_vmcs:
     relm_free_vmcs_region(vcpu);
 
 _out_free_host_stack:
-    free_pages((unsigned long)vcpu->host_stack, HOST_STACK_ORDER);
+    if(vcpu->host_stack)
+        free_pages((unsigned long)vcpu->host_stack, HOST_STACK_ORDER);
 
 _out_free_vcpu:
-    kfree(vcpu);
+    if(vcpu)
+        kfree(vcpu);
+    
     return NULL; 
 }
 
@@ -1414,6 +1431,18 @@ int relm_vcpu_vmcs_setup(struct vcpu *vcpu)
      * when the guest loads the page table root we already know about. */
     CHECK_VMWRITE(CR3_TARGET_COUNT, 0ULL);
 
+    if(relm_apic_vmcs_setup(vcpu) != 0)
+    {
+        pr_err("RELM: VCPU%d: APIC VMCS setup failed\n", vcpu->vpid);
+        return -EIO;
+    }
+ 
+    if(relm_apic_ept_setup(vcpu) != 0)
+    {
+        pr_err("RELM: VCPU%d: APIC EPT setup failed\n", vcpu->vpid);
+        return -EIO;
+    }
+
     pr_info("RELM: VCPU%d: Phase 2 VMCS setup complete on CPU%d\n",
             vcpu->vpid, smp_processor_id());
 
@@ -1472,6 +1501,7 @@ void relm_free_vcpu(struct vcpu *vcpu)
     if (!vcpu)
         return;
 
+    relm_apic_free(&vcpu->apic); 
     relm_free_all_msr_areas(vcpu);
     relm_free_msr_bitmap(vcpu);
     relm_free_io_bitmap(vcpu);
