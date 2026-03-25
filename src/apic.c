@@ -998,10 +998,10 @@ int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
 }
 
 
-/*this is the entry point called by hadle_vmexit() in cmexit.c 
+/*this is the entry point called by handle_vmexit() in vmexit.c 
 * when exit reason == EXIT_REASON_APIC_ACCESS (44)
-* for write (type 1), qe still need to know what value was written. 
-* the hardware doesn;t tell us this directly, it only tells us  the 
+* for write (type 1), we still need to know what value was written. 
+* the hardware doesn't tell us this directly, it only tells usthe 
 * address and direction. the value is in one of the
 * guest's general-purpose registers. 
 * 
