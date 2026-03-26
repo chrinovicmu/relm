@@ -1676,6 +1676,395 @@ static int relm_setup_guest_state(struct vcpu *vcpu)
     return 0; 
 }
 
+void relm_cr3_cache_init(struct cr3_shadow_cache *cache)
+{
+    memset(cache, 0, sizeof(cache)); 
+    spin_lock_init(&cache->lock); 
+    pr_info("RELM: CR3 cache: initialised (candidates=%u slots, max_targets=%u)\n",
+            RELM_CR3_CACHE_SIZE, RELM_CR3_MAX_TARGETS);
+}
+
+void relm_cr3_cache_policy_frequency(
+    const struct cr3_target_entry *candidates,
+    uint32_t                       n_candidates,
+    uint64_t                      *selected_out,
+    uint32_t                      *count_out)
+{
+    bool     picked[RELM_CR3_CACHE_SIZE] = { false };
+    uint32_t n_selected = 0;
+    uint32_t pass;
+    uint32_t i;
+    uint32_t best_idx;
+    uint64_t best_count;
+    uint64_t best_ts;
+   
+    uint32_t n_passes = (n_candidates < RELM_CR3_MAX_TARGETS)
+                        ? n_candidates
+                        : RELM_CR3_MAX_TARGETS;
+ 
+    for(pass = 0; pass < n_passes; pass++)
+    {
+        best_idx   = RELM_CR3_CACHE_SIZE;
+        best_count = 0;
+        best_ts    = 0;
+ 
+        for(i = 0; i < n_candidates; i++)
+        {
+            if(picked[i])
+                continue;
+ 
+            if(candidates[i].cr3_value == 0)
+                continue;
+ 
+            if(candidates[i].hit_count == 0)
+                continue;
+    
+            if(candidates[i].hit_count > best_count ||
+               (candidates[i].hit_count == best_count &&
+                candidates[i].last_seen_ns > best_ts))
+            {
+                best_idx   = i;
+                best_count = candidates[i].hit_count;
+                best_ts    = candidates[i].last_seen_ns;
+            }
+        }
+ 
+        /* If best_idx is still RELM_CR3_CACHE_SIZE, we found no valid
+         * unpicked candidate in this pass. This happens when fewer than
+         * n_passes non-empty non-picked entries exist (e.g. only 2 distinct
+         * CR3 values have been observed so far). Stop the outer loop. */
+        if(best_idx == RELM_CR3_CACHE_SIZE)
+            break;
+ 
+        /* Commit the winner from this pass to the output array.
+         * selected_out[n_selected] receives the CR3 physical address. */
+        selected_out[n_selected] = candidates[best_idx].cr3_value;
+        n_selected++;
+ 
+        /* Mark this index as picked so the next pass skips it.
+         * Without this, every pass would select the same (globally best) entry. */
+        picked[best_idx] = true;
+    }
+ 
+    /* Write the final count to the output variable.
+     * The caller uses this to know how many of selected_out[] are valid. */
+    *count_out = n_selected;
+ 
+    PDEBUG("RELM: CR3 cache: frequency policy selected %u targets "
+           "(from %u candidates)\n", n_selected, n_candidates);
+}
+
+void relm_cr3_cache_apply(struct cr3_shadow_cache *cache)
+{
+    uint64_t new_targets[RELM_CR3_MAX_TARGETS];
+    uint32_t new_count = 0;
+    uint32_t i, j;
+ 
+    bool changed = false;
+ 
+    relm_cr3_cache_policy_frequency(
+        cache->candidates,        /* full candidate array, read-only        */
+        cache->candidate_count,   /* number of populated entries            */
+        new_targets,              /* output: up to 4 selected CR3 values    */
+        &new_count                /* output: actual number written          */
+    );
+ 
+    if(new_count != cache->promoted_count)
+    {
+        changed = true;
+    }
+    else
+    {
+        for(i = 0; i < new_count; i++)
+        {
+            bool found_in_current = false;
+ 
+            for(j = 0; j < RELM_CR3_CACHE_SIZE; j++)
+            {
+                if(cache->candidates[j].promoted &&
+                   cache->candidates[j].cr3_value == new_targets[i])
+                {
+                    found_in_current = true;
+                    break;
+                }
+            }
+ 
+            if(!found_in_current)
+            {
+                /* This target is new — not in the current VMCS set */
+                changed = true;
+                break;
+            }
+        }
+    }
+ 
+    /* If nothing changed, return early to avoid unnecessary VMWRITE calls */
+    if(!changed)
+    {
+        PDEBUG("RELM: CR3 cache: apply — no change to target set\n");
+        return;
+    }
+ 
+    for(i = 0; i < RELM_CR3_CACHE_SIZE; i++)
+    {
+        /* Only clear entries that were actually promoted — no-op on others */
+        if(cache->candidates[i].promoted)
+        {
+            cache->candidates[i].promoted = false;
+            PDEBUG("RELM: CR3 cache: demoting CR3=0x%llx from VMCS slot\n",
+                   cache->candidates[i].cr3_value);
+        }
+    }
+ 
+    for(i = 0; i < new_count; i++)
+    {
+        if(_vmwrite(CR3_TARGET_VALUES[i], new_targets[i]) != 0)
+        {
+            pr_err("RELM: CR3 cache: VMWRITE CR3_TARGET_VALUE%u = 0x%llx failed\n",
+                   i, new_targets[i]);
+ 
+            _vmwrite(CR3_TARGET_COUNT, 0);
+            cache->promoted_count = 0;
+            return;
+        }
+ 
+        pr_info("RELM: CR3 cache: VMCS slot %u ← CR3=0x%llx\n",
+                i, new_targets[i]);
+    }
+ 
+    if(_vmwrite(CR3_TARGET_COUNT, new_count) != 0)
+    {
+        pr_err("RELM: CR3 cache: VMWRITE CR3_TARGET_COUNT = %u failed\n",
+               new_count);
+        /* Disable targeting to leave VMCS in a safe state */
+        _vmwrite(CR3_TARGET_COUNT, 0);
+        cache->promoted_count = 0;
+        return;
+    }
+ 
+    for(i = 0; i < RELM_CR3_CACHE_SIZE; i++)
+    {
+        if(cache->candidates[i].cr3_value == 0)
+            continue;
+ 
+        for(j = 0; j < new_count; j++)
+        {
+            if(cache->candidates[i].cr3_value == new_targets[j])
+            {
+                /* Mark as promoted — the eviction code will skip this entry */
+                cache->candidates[i].promoted = true;
+                break;
+            }
+        }
+    }
+ 
+    /* Record the new promoted count for use in Step 2 of future apply calls */
+    cache->promoted_count = new_count;
+ 
+    pr_info("RELM: CR3 cache: applied %u CR3 targets to VMCS "
+            "(total exits seen: %llu)\n",
+            new_count, cache->total_cr3_exits);
+}
+ 
+
+void relm_cr3_cache_record(struct vcpu *vcpu, uint64_t cr3_value)
+{
+    struct cr3_shadow_cache *cache = &vcpu->cr3_cache;
+    uint64_t now_ns = ktime_get_ns();
+    uint32_t found_idx = RELM_CR3_CACHE_SIZE;
+    uint32_t evict_idx = RELM_CR3_CACHE_SIZE;
+    uint64_t evict_count = U64_MAX;
+    uint32_t empty_idx = RELM_CR3_CACHE_SIZE;
+    uint32_t i;
+
+    bool need_apply = false;
+    cache->total_cr3_exits++;
+    spin_lock(&cache->lock);
+ 
+    for(i = 0; i < RELM_CR3_CACHE_SIZE; i++)
+    {
+        if(cache->candidates[i].cr3_value == cr3_value)
+        {
+            found_idx = i;
+            break;
+        }
+ 
+        if(cache->candidates[i].cr3_value == 0 &&
+           empty_idx == RELM_CR3_CACHE_SIZE)
+        {
+            empty_idx = i;
+        }
+ 
+        if(cache->candidates[i].cr3_value != 0 &&
+           !cache->candidates[i].promoted   &&
+           cache->candidates[i].hit_count < evict_count)
+        {
+            evict_idx   = i;
+            evict_count = cache->candidates[i].hit_count;
+        }
+    }
+ 
+    if(found_idx < RELM_CR3_CACHE_SIZE)
+    {
+        cache->candidates[found_idx].hit_count++;
+        cache->candidates[found_idx].last_seen_ns = now_ns;
+ 
+        PDEBUG("RELM: CR3 cache: HIT CR3=0x%llx count=%llu\n",
+               cr3_value, cache->candidates[found_idx].hit_count);
+ 
+        if(cache->candidates[found_idx].hit_count >= RELM_CR3_PROMOTE_THRESHOLD &&
+           !cache->candidates[found_idx].promoted)
+        {
+            pr_info("RELM: CR3 cache: CR3=0x%llx crossed threshold "
+                    "(count=%llu) — triggering promotion cycle\n",
+                    cr3_value, cache->candidates[found_idx].hit_count);
+            need_apply = true;
+        }
+ 
+        spin_unlock(&cache->lock);
+        goto _check_apply;
+    }
+ 
+    if(empty_idx < RELM_CR3_CACHE_SIZE)
+    {
+        cache->candidates[empty_idx].cr3_value    = cr3_value;
+        cache->candidates[empty_idx].hit_count    = 1;   /* first observation */
+        cache->candidates[empty_idx].last_seen_ns = now_ns;
+        cache->candidates[empty_idx].promoted     = false;
+ 
+        cache->candidate_count++;
+ 
+        PDEBUG("RELM: CR3 cache: INSERT CR3=0x%llx into slot %u "
+               "(%u/%u slots used)\n",
+               cr3_value, empty_idx,
+               cache->candidate_count, RELM_CR3_CACHE_SIZE);
+    }
+    else if(evict_idx < RELM_CR3_CACHE_SIZE)
+    {
+        pr_info("RELM: CR3 cache: EVICT CR3=0x%llx (count=%llu) "
+                "← replaced by new CR3=0x%llx\n",
+                cache->candidates[evict_idx].cr3_value,
+                cache->candidates[evict_idx].hit_count,
+                cr3_value);
+ 
+        cache->candidates[evict_idx].cr3_value    = cr3_value;
+        cache->candidates[evict_idx].hit_count    = 1;
+        cache->candidates[evict_idx].last_seen_ns = now_ns;
+        cache->candidates[evict_idx].promoted     = false;
+    }
+    else
+    {
+        pr_err("RELM: CR3 cache: BUG: table full and no eviction candidate "
+               "(promoted_count=%u) — dropping CR3=0x%llx\n",
+               cache->promoted_count, cr3_value);
+    }
+ 
+    spin_unlock(&cache->lock);
+ 
+_check_apply:
+    if(need_apply)
+        relm_cr3_cache_apply(&vcpu->cr3_cache);
+}
+ 
+
+int relm_cr3_cache_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
+{
+    uint32_t src_reg = (uint32_t)((exit_qual & CR_ACCESS_SOURCE_REG_MASK)
+                                   >> CR_ACCESS_SOURCE_REG_SHIFT);
+ 
+    uint64_t new_cr3;
+    uint64_t instr_len;
+    uint64_t guest_rip;
+ 
+    const uint64_t *gpr_table[] = {
+        vcpu->regs.rax,
+        vcpu->regs.rcx,
+        vcpu->regs.rdx,
+        vcpu->regs.rbx,
+        vcpu->regs.rsp,   /* guest RSP — distinct from host RSP */
+        vcpu->regs.rbp,
+        vcpu->regs.rsi,
+        vcpu->regs.rdi,
+        vcpu->regs.r8,
+        vcpu->regs.r9,
+        vcpu->regs.r10,
+        vcpu->regs.r11,
+        vcpu->regs.r12,
+        vcpu->regs.r13,
+        vcpu->regs.r14,
+        vcpu->regs.r15,
+    };
+ 
+    /* Bounds-check src_reg. Values 0–15 are valid (4 bits from hardware).
+     * A value outside this range would indicate a hardware bug or memory
+     * corruption. We guard defensively. */
+    if(src_reg > 15)
+    {
+        pr_err("RELM: CR3 cache: invalid source GPR %u in EXIT_QUALIFICATION=0x%llx\n",
+               src_reg, exit_qual);
+        instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+        guest_rip = __vmread(GUEST_RIP);
+        _vmwrite(GUEST_RIP, guest_rip + instr_len);
+        return 1;
+    }
+ 
+    new_cr3 = *gpr_table[src_reg];
+ 
+    PDEBUG("RELM: CR3 exit: CR3=0x%llx from GPR%u (total exits=%llu)\n",
+           new_cr3, src_reg, vcpu->cr3_cache.total_cr3_exits + 1);
+ 
+    /* Update VMCS GUEST_CR3 so the guest's address space actually switches.
+     * Without this VMWRITE, the guest would continue using the old page table
+     * after resuming — all subsequent virtual address translations would use
+     * the wrong PML4, causing page faults or executing the wrong code.
+     *
+     * VMCS encoding for GUEST_CR3: 0x6802 (natural-width guest-state field).
+     * Also update vcpu->regs.rip-equivalent for consistency. */
+    _vmwrite(0x6802, new_cr3);   /* GUEST_CR3 */
+ 
+    relm_cr3_cache_record(vcpu, new_cr3);
+ 
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    guest_rip = __vmread(GUEST_RIP);
+ 
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+ 
+    PDEBUG("RELM: CR3 exit: handled — RIP 0x%llx → 0x%llx\n",
+           guest_rip, guest_rip + instr_len);
+ 
+    return 1;
+}
+ 
+void relm_cr3_cache_dump(const struct cr3_shadow_cache *cache)
+{
+    uint32_t i;
+ 
+    pr_info("RELM: CR3 cache dump:\n");
+    pr_info("  total_cr3_exits  = %llu\n",  cache->total_cr3_exits);
+    pr_info("  total_suppressions = %llu\n", cache->total_suppressions);
+    pr_info("  candidate_count  = %u / %u\n",
+            cache->candidate_count, RELM_CR3_CACHE_SIZE);
+    pr_info("  promoted_count   = %u / %u (VMCS targets)\n",
+            cache->promoted_count, RELM_CR3_MAX_TARGETS);
+    pr_info("  candidates:\n");
+ 
+    for(i = 0; i < RELM_CR3_CACHE_SIZE; i++)
+    {
+        if(cache->candidates[i].cr3_value == 0)
+            continue;
+ 
+        pr_info("    [%2u] CR3=0x%016llx  hits=%6llu  age_ns=%llu  %s\n",
+                i,
+                cache->candidates[i].cr3_value,
+                cache->candidates[i].hit_count,
+                cache->candidates[i].last_seen_ns,
+                /* Mark promoted entries clearly so the reader can see which
+                 * four are currently suppressing VM-exits in the VMCS */
+                cache->candidates[i].promoted ? "PROMOTED ← in VMCS" : "candidate");
+    }
+}
+ 
+
 int relm_init_vmcs_state(struct vcpu *vcpu)
 {
     if(!vcpu)
@@ -1805,6 +2194,5 @@ void relm_dump_vcpu(struct vcpu *vcpu)
         pr_info("PerfGlobalCtrl=0x%016llx\n",
             __vmread(HOST_IA32_PERF_GLOBAL_CTRL));
     }
-    
- 
+     
 }
