@@ -68,6 +68,7 @@ int relm_x86_decode_apic_write(struct vcpu *vcpu,
                                struct x86_decoded_write *out);
 uint32_t relm_x86_gpr_value(const struct vcpu *vcpu,
                             uint8_t reg_num);
+
 const char *relm_x86_gpr_name(uint8_t reg_num);
 
 #endif 

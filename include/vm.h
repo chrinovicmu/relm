@@ -18,7 +18,7 @@ struct guest_mem_region
     uint64_t gpa_start; 
     uint64_t size; 
     struct page **pages; 
-    uint64_t num_pages; 
+    uint64_t nr_pages; 
     uint64_t flags;
     struct guest_mem_region *next; 
 }; 
