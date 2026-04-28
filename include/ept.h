@@ -133,7 +133,8 @@ int relm_ept_map_range(struct ept_context *ept, uint64_t gpa_start,
                       uint64_t hpa_start, uint64_t size, uint64_t flags); 
 
 int relm_ept_unmap_page(struct ept_context *ept, uint64_t gpa); 
-
+int relm_ept_translate_gpa(struct ept_context *ept,
+                           uint64_t gpa, uint64_t *hpa_out);
 /*look up host physicall address for gpa 
  * walk EPT tables to find HPA mapped to a given GPA*/ 
 int relm_ept_get_mapping(struct ept_context *ept, uint64_t gpa, uint64_t *hpa); 

@@ -328,4 +328,233 @@ static bool is_rex_prefix(uint8_t byte)
     return (byte & X86_REX_MASK) == X86_REX_BASE;
 }
 
+static uint32_t modrm_extra_bytes(uint8_t modrm, uint8_t sib_byte, 
+                                  bool *has_sib)
+{
+    uint8_t mod = (modrm & X86_MODRM_MOD_MASK) >> X86_MODRM_MOD_SHIFT; 
+    uint8_t rm = modrm & X86_MODRM_RM_MASK; 
+
+    uint32_t extra = 0; 
+    *has_sib = false; 
+
+    if(rm == X86_MPRM_RM_SIB && mod != (X86_MODRM_MOD_REG >> X86_MODRM_MOD_SHIFT))
+    {
+        has_sib = true; 
+        extra += 1; 
+    }
+
+    switch(mod)
+    {
+        case 0x0: /*mod=00*/
+            
+            if(rm == X86_MODRM_RM_RIPREL & !(has_sib))
+            {
+                extra += 4; 
+            }
+            else if(*has_sib){
+                uint8_t sib_base = sib_byte & 0x07; 
+                if(sib_base == 5)
+                {
+                    extra += 4; 
+                }
+            }
+            break; 
+        case 0x1: /*mod=01: 8-bit displacement*/
+            extra += 1; 
+            break; 
+
+        case 0x2: /*mod=10: 32-bit signed displacement*/
+            extra += 4; 
+            break;
+
+        case 0x3:
+            pr_warn("RELM: x86_decode: ModRM mod=11 in memory write context\n");
+            break;
+    }
+
+    return true; 
+}
+
+int relm_x86_decode_apic_write(struct vcpu *vcpu, struct x86_decode_write *out)
+{
+    uint8_t bytes[X86_INS_LEN]; 
+    uint32_t pos = 0; 
+    bool rex_r = false; 
+    bool rex_present = false; 
+
+    uint64_t rip = __vmread(GUEST_RIP); 
+
+    memset(out, 0, sizeof(*out)); 
+    out->result = X86_DECODE_FAIL; 
+    out->reg_num = 0xFF; /*sentinel: no register*/ 
+
+    if(relm_guest_read_bytes(vcpu, rip, bytes, X86_MAX_INSN_LEN) != 0)
+    {
+        pr_warn("RELM: x86_decode: failed to read %u bytes at GUEST_RIP=0x%llx\n",
+                X86_MAX_INSN_LEN, rip);
+        return -1;
+    }
+
+    /*skip legacy prefix */ 
+    {
+        int prefix_count = 0;
+        while(pos < X86_MAX_INSN_LEN &&
+              prefix_count < 4 &&
+              is_legacy_prefix(bytes[pos]))
+        {
+            PDEBUG("RELM: x86_decode: skipping legacy prefix 0x%02x at pos %u\n",
+                   bytes[pos], pos);
+            pos++;
+            prefix_count++;
+        }
+    }
+
+    if(pos < X86_MAX_INSN_LEN && is_rex_prefix(bytes[pos]))
+    {
+        uint8_t rex = bytes[pos]; 
+        rex_present = true; 
+
+        /*REX.R*/ 
+        rex_r = (rex & X86_REX_R) != 0; 
+        
+        PDEBUG("RELM: x86_decode: REX byte=0x%02x: W=%u R=%u X=%u B=%u\n",
+               rex,
+               (rex & X86_REX_W) ? 1 : 0,
+               (rex & X86_REX_R) ? 1 : 0,
+               (rex & X86_REX_X) ? 1 : 0,
+               (rex & X86_REX_B) ? 1 : 0);
+
+        pos++; 
+    }
+
+    if(pos >= X86_MAX_INSN_LEN)
+    {
+        pr_warn("RELM: x86_decode: no opcode byte (ran out of instruction bytes)\n");
+        return -1;
+    }
+
+
+    uint8_t opcode = bytes[pos++]; 
+    
+    PDEBUG("RELM: x86_decode: opcode=0x%02x%s at GUEST_RIP=0x%llx\n",
+           opcode, rex_present ? " (REX present)" : "", rip);
+
+    if(pos >= X86_MAX_INSN_LEN)
+    {
+        pr_warn("RELM: x86_decode: missing ModRM byte\n");
+        return -1;
+    }
+ 
+    uint8_t modrm = bytes[pos++];
+    
+    uint8_t modrm_reg = (modrm & X86_MODRM_REG_MASK) >> X86_MODRM_MOD_SHIFT;
+    uint8_t reg_num   = modrm_reg + (rex_r ? 8 : 0);
+ 
+    uint8_t mod = (modrm & X86_MODRM_MOD_MASK) >> X86_MODRM_MOD_SHIFT;
+    uint8_t rm  =  modrm & X86_MODRM_RM_MASK;
+
+    uint8_t sib_byte = 0;
+    if(rm == X86_MODRM_RM_SIB && mod != 0x3)
+    {
+        if(pos >= X86_MAX_INSN_LEN)
+        {
+            pr_warn("RELM: x86_decode: missing SIB byte\n");
+            return -1;
+        }
+        sib_byte = bytes[pos++];  /* consume the SIB byte */
+ 
+        PDEBUG("RELM: x86_decode: SIB byte=0x%02x (scale=%u index=%u base=%u)\n",
+               sib_byte,
+               (sib_byte >> 6) & 0x3,
+               (sib_byte >> 3) & 0x7,
+               sib_byte & 0x7);
+    }
+
+   
+    bool has_sib = (sib_byte != 0 || (rm == X86_MODRM_RM_SIB && mod != 0x3));
+    uint32_t disp_size = modrm_extra_bytes(modrm, sib_byte, &has_sib);
+ 
+    if(pos + disp_size > X86_MAX_INSN_LEN)
+    {
+        pr_warn("RELM: x86_decode: displacement overflows instruction buffer\n");
+        return -1;
+    }
+ 
+    pos += disp_size;  /* skip past the displacement bytes */
+
+     switch(opcode)
+    {
+        case X86_OP_MOV_RM_R:
+        case X86_OP_MOV_RM8_R8:
+        {
+            uint32_t value = relm_x86_gpr_value(vcpu, reg_num);
+ 
+            out->result   = X86_DECODE_REG;
+            out->reg_num  = reg_num;
+            out->value    = value;
+            out->insn_len = (uint8_t)pos;  /* everything consumed so far */
+ 
+            pr_info("RELM: x86_decode: APIC write from %s (reg %u) = 0x%08x "
+                    "insn_len=%u\n",
+                    relm_x86_gpr_name(reg_num), reg_num, value, pos);
+            return 0;
+        }
+ 
+        case X86_OP_MOV_RM_IMM:
+        {
+            if(pos + 4 > X86_MAX_INSN_LEN)
+            {
+                pr_warn("RELM: x86_decode: immediate overflows instruction "
+                        "buffer (pos=%u)\n", pos);
+                return -1;
+            }
+ 
+            uint32_t imm32 =
+                (uint32_t)bytes[pos + 0]          |   /* bits  7:0  */
+                (uint32_t)bytes[pos + 1] << 8      |   /* bits 15:8  */
+                (uint32_t)bytes[pos + 2] << 16     |   /* bits 23:16 */
+                (uint32_t)bytes[pos + 3] << 24;        /* bits 31:24 */
+ 
+            pos += 4;  /* consume the 4-byte immediate */
+ 
+            out->result   = X86_DECODE_IMM;
+            out->reg_num  = 0xFF;  /* no register */
+            out->value    = imm32;
+            out->insn_len = (uint8_t)pos;
+ 
+            pr_info("RELM: x86_decode: APIC write immediate 0x%08x "
+                    "insn_len=%u\n", imm32, pos);
+            return 0;
+        }
+ 
+        case X86_OP_MOV_RM8_IMM8:
+        {
+            /* 8-bit immediate: a single byte after the ModRM+displacement */
+            if(pos >= X86_MAX_INSN_LEN)
+            {
+                pr_warn("RELM: x86_decode: missing imm8 byte\n");
+                return -1;
+            }
+ 
+            uint32_t imm8 = (uint32_t)bytes[pos++];
+ 
+            out->result   = X86_DECODE_IMM;
+            out->reg_num  = 0xFF;
+            out->value    = imm8;
+            out->insn_len = (uint8_t)pos;
+ 
+            pr_info("RELM: x86_decode: APIC write imm8 0x%02x insn_len=%u\n",
+                    imm8, pos);
+            return 0;
+        }
+ 
+        default:
+            pr_warn("RELM: x86_decode: unrecognised opcode 0x%02x "
+                    "at GUEST_RIP=0x%llx (bytes: %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+                    opcode, rip,
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7]);
+            return -1;
+    }
+}
 
