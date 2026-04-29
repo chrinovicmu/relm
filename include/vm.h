@@ -54,6 +54,8 @@ struct relm_vm
     /*for guest page tables */ 
     uint64_t pml4_gpa; 
 
+    struct relm_iommu_context iommu;
+
     int max_vcpus;
     int online_vcpus;
     struct vcpu **vcpus; 
