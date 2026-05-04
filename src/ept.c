@@ -485,7 +485,7 @@ int relm_unmap_page(struct ept_context *ept, uint64_t gpa)
 }
 
 /*walk EPT tables to find the HPA of given GPA */  
-int relm_get_mapping(struct ept_context *ept, uint64_t gpa, uint64_t *hpa)
+int relm_ept_get_mapping(struct ept_context *ept, uint64_t gpa, uint64_t *hpa)
 {
     ept_pdpt_t *pdpt; 
     ept_pd_t *pd; 

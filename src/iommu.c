@@ -193,6 +193,7 @@ int relm_iommu_map_guest_ram(struct relm_vm *vm)
     uint64_t hpa;
     uint64_t n_mapped  = 0;
     uint64_t n_skipped = 0;
+    bool is_write = true; 
     int      ret;
  
     if(!iommu->enabled || !iommu->domain)
@@ -208,22 +209,16 @@ int relm_iommu_map_guest_ram(struct relm_vm *vm)
  
     for(gpa = 0; gpa < vm->total_guest_ram; gpa += PAGE_SIZE)
     {
-        /* Ask the EPT for the HPA corresponding to this GPA.
-         * If the GPA is not mapped in the EPT (e.g. VGA hole at 0xA0000),
-         * relm_ept_translate_gpa returns -ENOENT and we skip it. */
-        ret = relm_ept_translate_gpa(vm->ept, gpa, &hpa);
+        ret = relm_ept_get_mapping(vm->ept, gpa, &hpa);
         if(ret)
         {
             n_skipped++;
             continue;
         }
  
-        /* Page-align the HPA: relm_ept_translate_gpa returns the full
-         * HPA including any byte offset within the page. Since we are
-         * mapping whole pages, strip the low 12 bits. */
         hpa &= PAGE_MASK;
  
-        ret = relm_iommu_map(vm, gpa, hpa, PAGE_SIZE, true /* write */);
+        ret = relm_iommu_map(vm, gpa, hpa, PAGE_SIZE, is_write)
         if(ret)
         {
             pr_err("RELM: IOMMU: map_guest_ram failed at GPA=0x%llx "
