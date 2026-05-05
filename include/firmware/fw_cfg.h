@@ -5,10 +5,8 @@
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <include/firmware/e820.h>
-#include <stdint.h>
  
 struct relm_vm;
-
 
 #define FW_CFG_SIGNATURE        0x0000
 #define FW_CFG_ID               0x0001 
@@ -66,7 +64,13 @@ struct fw_cfg_device
     struct relm_e820_map e820_map; 
     spinlock_t lock; 
     bool initialize; 
-}; 
+};
+
+struct fw_cfg_file_dir {
+    __be32 count;
+    struct fw_cfg_file files[];
+} __attribute__((packed));
+
 
 void relm_fw_cfg_init(struct fw_cfg_device *fw); 
 void relm_fw_cfg_destroy(struct fw_cfg_device *fw);
