@@ -120,7 +120,7 @@ int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_s
 
     region->gpa_start = gpa_start;
     region->size = size;
-    region->num_pages = num_pages;
+    region->nr_pages = num_pages;
     region->flags = EPT_RWX;
 
     for(i = 0; i < num_pages; i++ )
@@ -189,7 +189,7 @@ void relm_vm_free_guest_mem(struct relm_vm *vm)
         next = region->next;
         if(region->pages)
         {
-            for(i = 0; i < region->num_pages; i++)
+            for(i = 0; i < region->nr_pages; i++)
             {
                 if(region->pages[i])
                     __free_page(region->pages[i]);

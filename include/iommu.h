@@ -6,8 +6,6 @@
 #include <linux/list.h>
 #include <linux/iommu.h>   
 #include <linux/pci.h>  
-#include <stddef.h>
-#include <stdint.h>
  
 struct relm_vm;
 struct ept_context;
@@ -17,7 +15,7 @@ struct ept_context;
 /*tracks each pass-trhough device */ 
 struct relm_pass_device
 {
-    struct pci_dev *dev; 
+    struct pci_dev *pdev; 
     struct list_head link; 
 
 }; 
@@ -35,7 +33,7 @@ struct relm_iommu_context
 
 int relm_iommu_init(struct relm_vm *vm, struct device *dev);
 void relm_iommu_destroy(struct relm_vm *vm); 
-int relm_iommu_map(struct relm_vm *vm, uint64_t gpa, uint64_t hpa
+int relm_iommu_map(struct relm_vm *vm, uint64_t gpa, uint64_t hpa, 
                    size_t size, bool write); 
 void relm_iommu_unmap(struct relm_vm *vm, uint64_t gpa, size_t size);
 int relm_iommu_attach_device(struct relm_vm *vm, struct pci_dev *pdev);

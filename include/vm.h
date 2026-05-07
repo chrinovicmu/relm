@@ -5,6 +5,8 @@
 #include <include/vmx.h>
 #include <include/vmx_ops.h>
 #include <include/ept.h> 
+#include <include/iommu.h> 
+#include <include/firmware/fw_cfg.h> 
 
 #define RELM_MAX_VCPUS 1  
 #define GUEST_STACK_ORDER 2 

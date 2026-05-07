@@ -20,7 +20,6 @@
 #include <include/vm.h>     
 #include <include/ept.h>       
 #include <include/iommu.h>
-#include <stddef.h>
 #include <utils/utils.h>
 
 static int relm_iommu_fault_handler(struct iommu_domain *domain, 
@@ -57,7 +56,7 @@ int relm_iommu_init(struct relm_vm *vm, struct device *dev)
         return -ENODEV;
 
     }
-    if(!iommu_capable(dev->bus, IOMMU_CAP_INTR_REMAP))
+    if(!device_iommu_capable(dev, IOMMU_CAP_INTR_REMAP))
     {
         pr_warn("RELM: IOMMU: interrupt remapping NOT supported\n"
                 "  Devices can inject arbitrary MSI interrupts — security risk!\n"
@@ -79,10 +78,10 @@ int relm_iommu_init(struct relm_vm *vm, struct device *dev)
                              (void *)vm);
 
     INIT_LIST_HEAD(&iommu->devices);
-    iommu->n_devices       = 0;
-    iommu->enabled         = true;
-    iommu->n_mapped_pages  = 0;
-    iommu->fault_count     = 0;
+    iommu->n_devs           = 0;
+    iommu->enabled          = true;
+    iommu->n_mapped_pages   = 0;
+    iommu->fault_count      = 0;
  
     pr_info("RELM: IOMMU: domain created for VM '%s' (IOMMU_DOMAIN_UNMANAGED)\n",
             vm->vm_name);
@@ -99,7 +98,7 @@ void relm_iommu_destroy(struct relm_vm *vm)
     if(!iommu->enabled || iommu->domain)
         return; 
 
-    list_for_each_entry(entry, tmp, &iommu->devices, link){
+    list_for_each_entry(entry, &iommu->devices, link){
     
         pr_info("RELM: IOMMU: detaching device %s from VM '%s'\n",
                 pci_name(entry->pdev), vm->vm_name);
@@ -110,7 +109,7 @@ void relm_iommu_destroy(struct relm_vm *vm)
         kfree(entry);
     }
 
-    iommu->n_devices = 0;
+    iommu->n_devs = 0;
     iommu_domain_free(iommu->domain);
     iommu->domain  = NULL;
     iommu->enabled = false;
@@ -218,7 +217,7 @@ int relm_iommu_map_guest_ram(struct relm_vm *vm)
  
         hpa &= PAGE_MASK;
  
-        ret = relm_iommu_map(vm, gpa, hpa, PAGE_SIZE, is_write)
+        ret = relm_iommu_map(vm, gpa, hpa, PAGE_SIZE, is_write);
         if(ret)
         {
             pr_err("RELM: IOMMU: map_guest_ram failed at GPA=0x%llx "
@@ -240,6 +239,7 @@ int relm_iommu_attach_device(struct relm_vm *vm, struct pci_dev *pdev)
 {
     struct relm_iommu_context *iommu = &vm->iommu; 
     struct relm_pass_device *entry; 
+    int ret; 
 
     if(!iommu->enabled || !iommu->domain)
     {
@@ -247,7 +247,7 @@ int relm_iommu_attach_device(struct relm_vm *vm, struct pci_dev *pdev)
         return -EINVAL;
     }
 
-    entry = kmalloc(sizeof(*entry, GFP_KERNEL); 
+    entry = kmalloc(sizeof(*entry), GFP_KERNEL); 
     if(!entry)
         return -ENOMEM; 
 
@@ -268,10 +268,10 @@ int relm_iommu_attach_device(struct relm_vm *vm, struct pci_dev *pdev)
     }
 
     list_add(&entry->link, &iommu->devices);
-    iommu->n_devices++;
+    iommu->n_devs++;
  
     pr_info("RELM: IOMMU: device %s (%04x:%04x) attached to VM '%s'\n"
-            "  All DMA from this device now translated through VM's IOMMU domain\n",
+            "All DMA from this device now translated through VM's IOMMU domain\n",
             pci_name(pdev),
             pdev->vendor, pdev->device,
             vm->vm_name);
@@ -282,7 +282,7 @@ int relm_iommu_attach_device(struct relm_vm *vm, struct pci_dev *pdev)
 void relm_iommu_detach_device(struct relm_vm *vm, struct pci_dev *pdev)
 {
     struct relm_iommu_context      *iommu = &vm->iommu;
-    struct relm_passthrough_device *entry, *tmp;
+    struct relm_pass_device *entry, *tmp;
  
     if(!iommu->enabled || !iommu->domain)
         return;
@@ -300,7 +300,7 @@ void relm_iommu_detach_device(struct relm_vm *vm, struct pci_dev *pdev)
             pci_dev_put(entry->pdev);
             list_del(&entry->link);
             kfree(entry);
-            iommu->n_devices--;
+            iommu->n_devs--;
             return;
         }
     }
@@ -312,7 +312,7 @@ void relm_iommu_detach_device(struct relm_vm *vm, struct pci_dev *pdev)
 void relm_iommu_dump_stats(const struct relm_vm *vm)
 {
     const struct relm_iommu_context      *iommu = &vm->iommu;
-    const struct relm_passthrough_device *entry;
+    const struct relm_pass_device *entry;
  
     pr_info("RELM: IOMMU stats for VM '%s':\n", vm->vm_name);
     pr_info("  enabled:        %s\n",       iommu->enabled ? "yes" : "no");
@@ -321,7 +321,7 @@ void relm_iommu_dump_stats(const struct relm_vm *vm)
             iommu->n_mapped_pages,
             iommu->n_mapped_pages * PAGE_SIZE / (1024 * 1024));
     pr_info("  fault_count:    %llu\n",      iommu->fault_count);
-    pr_info("  n_devices:      %u\n",        iommu->n_devices);
+    pr_info("  n_devs:      %u\n",        iommu->n_devs);
  
     if(!list_empty(&iommu->devices))
     {

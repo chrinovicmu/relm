@@ -26,6 +26,7 @@ $(MODULE_NAME)-y := \
     src/vmexit.o      \
     src/ept.o         \
     src/apic.o        \
+	src/iommu.o 	  \
     guest/guest_kernel_embed.o
 
 .PHONY: all modules clean

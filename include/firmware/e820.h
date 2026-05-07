@@ -3,7 +3,6 @@
 #define RELM_E820_H
  
 #include <linux/types.h>
-#include <stdint.h>
  
 struct relm_vm;
 
