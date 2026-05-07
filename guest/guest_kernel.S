@@ -27,5 +27,6 @@ _start:
     mov QWORD PTR [0x2000], rax
     mov rbx, QWORD PTR [0x2000]
     sub rbx, rax
-
+    
+    cpuid 
     hlt

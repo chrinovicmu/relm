@@ -43,6 +43,10 @@ static void emulate_cpuid(struct vcpu *vcpu)
         : "memory"
     );
 
+    /* log BEFORE state mutation (avoids confusion during tracing) */
+    PDEBUG("cpuid leaf=0x%x subleaf=0x%x -> eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x\n",
+           leaf, subleaf, eax, ebx, ecx, edx);
+
     /* write results back to guest register state */
     vcpu->regs.rax = eax;
     vcpu->regs.rbx = ebx;
