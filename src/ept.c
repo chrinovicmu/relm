@@ -58,17 +58,16 @@ bool relm_ept_check_support(void)
         return false; 
     }
 
-    pr_info("RELM: EPT support verified\n"); 
+    pr_info("RELM: EPT support verified\n");
 
-    if (ept_vpid_cap & EPT_CAP_2MB_PAGES)
-        pr_info("RELM: EPT 2MB large pages supported\n");
-    
-    if (ept_vpid_cap & EPT_CAP_1GB_PAGES)
-        pr_info("RELM: EPT 1GB large pages supported\n");
-        
-    if (ept_vpid_cap & EPT_CAP_AD_FLAGS)
-        pr_info("RELM: EPT accessed/dirty flags supported\n");
-    
+    RELM_EPT_PRINT_CAP(EPT_CAP_2MB_PAGES,
+                   "EPT 2MB large pages supported");
+
+    RELM_EPT_PRINT_CAP(EPT_CAP_1GB_PAGES,
+                   "EPT 1GB large pages supported");
+
+    RELM_EPT_PRINT_CAP(EPT_CAP_AD_FLAGS,
+                   "EPT accessed/dirty flags supported");  
     return true;
 }
 
@@ -99,8 +98,8 @@ int relm_setup_ept(struct relm_vm *vm)
         return err; 
     }
 
-    pr_info("RELM: EPT setup complete for VM %d (EPTP=0x%llx)\n", 
-            vm->vm_id, vm->ept->eptp); 
+   // pr_info("RELM: EPT setup complete for VM %d (EPTP=0x%llx)\n", 
+    //        vm->vm_id, vm->ept->eptp); 
 
     return 0; 
 }
@@ -187,8 +186,8 @@ struct ept_context *relm_ept_context_create(void)
 
     spin_lock_init(&ept->lock); 
 
-    pr_info("RELM : EPT context created, PML4 PA=0x%llx, EPTP=0x%llx\n", 
-            ept->pml4_pa, ept->eptp); 
+//    pr_info("RELM : EPT context created, PML4 PA=0x%llx, EPTP=0x%llx\n", 
+  //          ept->pml4_pa, ept->eptp); 
 
     return ept; 
 }
@@ -238,8 +237,8 @@ void relm_ept_context_destroy(struct ept_context *ept)
         ept->pml4_pa = 0; 
     }
 
-    pr_info("RELM: EPT context destroyed (mapped %llu bytes)\n", 
-            ept->stats.total_mapped); 
+  //  pr_info("RELM: EPT context destroyed (mapped %llu bytes)\n", 
+    //        ept->stats.total_mapped); 
 
     kfree(ept); 
 }
@@ -360,8 +359,8 @@ int relm_ept_map_page(struct ept_context *ept, uint64_t gpa,
 
     spin_unlock_irqrestore(&ept->lock, irq_flags); 
 
-    PDEBUG("RELM: Mapped GPA 0x%llx -> HPA 0x%llx (flags=0x%llx)\n",
-           gpa, hpa, flags);
+//    PDEBUG("RELM: Mapped GPA 0x%llx -> HPA 0x%llx (flags=0x%llx)\n",
+    //       gpa, hpa, flags);
     
    // relm_ept_invalidate_context(ept); 
     return 0; 
@@ -384,8 +383,7 @@ int relm_ept_map_range(struct ept_context *ept, uint64_t gpa_start,
     size = PAGE_ALIGN(size); 
     num_pages = size / EPT_PAGE_SIZE_4KB; 
 
-    pr_info("RELM: Mapping EPT range GPA 0x%llx -> HPA 0x%llx (%llu pages)\n",
-            gpa_start, hpa_start, num_pages); 
+    // PDEBUG("RELM: Mapping EPT range GPA 0x%llx -> HPA 0x%llx (%llu pages)\n",
 
     /*map each page in the range */ 
     for(i = 0; i < num_pages; i++)

@@ -78,7 +78,7 @@ static int __init relm_module_init(void)
         goto _cleanup_vm; 
     }
 
-    pr_info("RELM: Guest kernel (%zu bytes) loaded at GPA 0x%llx\n",
+    PDEBUG("RELM: Guest kernel (%zu bytes) loaded at GPA 0x%llx\n",
             guest_kernel_size, GUEST_CODE_GPA);
 
     vcpu = relm_vm_get_vcpu(my_vm, vpid); 

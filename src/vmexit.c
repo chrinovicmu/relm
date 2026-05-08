@@ -7,6 +7,7 @@
 #include <include/vmx_ops.h>
 #include <include/vmexit.h>
 #include <include/vmcs_state.h>
+#include <include/firmware/fw_cfg.h> 
 #include <utils/utils.h>
 
 #define CREATE_TRACE_POINTS 
@@ -159,7 +160,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
 
             /*treat all exceptions as fatal */
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0;
+            ret = 0;
+            break; 
         }
 
         case EXIT_REASON_EXTERNAL_INTERRUPT:
@@ -167,24 +169,27 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             /* external interrupt arrived while guest was running
             * just re-enter the guest */
             PDEBUG("relm: [VPID=%u] External interrupt\n", vcpu->vpid);
-            return 1;
+            ret = 1;
+            break; 
 
         case EXIT_REASON_TRIPLE_FAULT:
 
             pr_err("relm: [VPID=%u] Guest triple fault at RIP=0x%llx\n",
                    vcpu->vpid, guest_rip);
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0;
+            ret = 0;
+            break; 
 
         case EXIT_REASON_APIC_ACCESS:
             ret = relm_apic_handle_access(vcpu);
-            return ret; 
+            break;  
 
         case EXIT_REASON_INIT_SIGNAL:
 
             pr_info("relm: [VPID=%u] INIT signal received\n", vcpu->vpid);
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0;
+            ret = 0; 
+            break; 
 
         case EXIT_REASON_HLT:
 
@@ -197,38 +202,84 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
 
             /* stop execution on HLT */
-            return 0;
+            ret = 0; 
+            break; 
 
         case EXIT_REASON_CPUID:
         {
             emulate_cpuid(vcpu);
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
-
-            return 1;
+            ret = 1; 
+            break; 
         }
+
 
         case EXIT_REASON_IO_INSTRUCTION:
         {
-            bool is_in = (exit_qualification & (1ULL << 3)) != 0;
-            bool is_string = (exit_qualification & (1ULL << 4)) != 0;
+            uint32_t size = (uint32_t)(exit_qualification & 0x7ULL) + 1; 
+            bool is_in = (exit_qualification & (1ULL << 3)) != 0; 
+            bool is_str = (exit_qualification & (1ULL << 4)) != 0;
+                
+            /*REP prefix : repets ECX times */ 
             bool is_rep = (exit_qualification & (1ULL << 5)) != 0;
-            uint32_t size = (exit_qualification & 0x7) + 1;
-            uint16_t port = (exit_qualification >> 16) & 0xFFFF;
 
-            pr_info("relm: [VPID=%u] I/O %s%s%s port=0x%x size=%u at RIP=0x%llx\n",
-                    vcpu->vpid,
-                    is_in ? "IN" : "OUT",
-                    is_string ? " STRING" : "",
-                    is_rep ? " REP" : "",
-                    port, size, guest_rip);
 
-            /*TODO: emulate device or forward to userspace
-             * emulate as NOP for now*/
+            uint16_t port = (uint16_t)((exit_qualification >> 16) & 0xFFFFULL); 
+            uint32_t io_val = 0; 
+
+            PDEBUG("RELM: [VPID=%u] IO_EXIT: %s%s%s port=0x%03x size=%u "
+                   "RIP=0x%llx",
+                   vcpu->vpid,
+                   is_in  ? "IN"     : "OUT",
+                   is_str ? " STRING" : "",
+                   is_rep ? " REP"    : "",
+                   port, size, guest_rip);
+
+            if((port == FW_CFG_PORT_SEL || port == FW_CFG_PORT_DATA)
+                && !is_str
+                && !is_rep)
+            {
+                struct relm_vm *vm = vcpu->vm; 
+
+                /*for OUT (guest writing to fw_cfg)*/ 
+                if(!is_in)
+                {
+                    uint32_t size_mask = (size == 1) ? 0xFFU 
+                        : (size == 2) ? 0xFFFFU 
+                        : 0xFFFFFFFFU; 
+                        
+                    io_val = (uint32_t)(vcpu->regs.rax & size_mask); 
+                    PDEBUG("RELM: fw_cfg OUT port=0x%03x val=0x%08x (size=%u)",
+                           port, io_val, size);
+                }
+
+                ret = relm_fw_cfg_handle_io(&vm->fw_cfg, port, !is_in, size, &io_val);
+
+                /*guest is reading from fw_cfg*/  
+                if(is_in)
+                {
+                /*zero exend io_val to 64 bits and write to guest RAX*/ 
+                    vcpu->regs.rax = (unsigned long)(io_val & 0xFFFFFFFFUL); 
+                    _vmwrite(0x6818, vcpu->regs.rax); 
+
+                    PDEBUG("RELM: fw_cfg IN  port=0x%03x → val=0x%08x "
+                               "(size=%u) → RAX=0x%lx",
+                               port, io_val, size, vcpu->regs.rax);
+                }
+
+                instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+                _vmwrite(GUEST_RIP, guest_rip + instr_len);
+                break; 
+            }
+
+            PDEBUG("RELM: [VPID=%u] unhandled port 0x%03x %s size=%u — NOP",
+                   vcpu->vpid, port, is_in ? "IN" : "OUT", size);
+ 
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
-
-            return 1;
+            ret = 1;
+            break;
         }
 
         case EXIT_REASON_VMCALL:
@@ -240,7 +291,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             * advance RIP for now*/
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
-            return 1;
+            ret = 1;
+            break; 
 
         case EXIT_REASON_MSR_READ:
         {
@@ -257,7 +309,9 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
 
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
-            return 1;
+            ret = 1;
+            break; 
+
         }
 
         case EXIT_REASON_MSR_WRITE:
@@ -273,7 +327,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
 
-            return 1;
+            ret = 1;
+            break; 
         }
 
         case EXIT_REASON_EPT_VIOLATION:
@@ -301,7 +356,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                    ept_executable ? "X" : "-");
 
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0;
+            ret = 0;
+            break; 
         }
         
         case EXIT_REASON_CR_ACCESS:
@@ -316,7 +372,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                  * It records the new CR3 value, updates VMCS GUEST_CR3,
                  * advances GUEST_RIP, and potentially promotes hot values
                  * to suppress future exits. */
-                return relm_cr3_cache_handle_exit(vcpu, exit_qualification);
+                ret = relm_cr3_cache_handle_exit(vcpu, exit_qualification);
+                break; 
             }
             else
             {
@@ -326,9 +383,9 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                        "cr=%u type=%u at RIP=0x%llx\n",
                        vcpu->vpid, cr_num, acc_type >> 4, guest_rip);
                 vcpu->state = VCPU_STATE_STOPPED;
-                return 0;
+                ret = 0; 
+                break; 
             }
-            break;
         }
 
         case EXIT_REASON_INVALID_GUEST_STATE:
@@ -340,7 +397,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             relm_dump_vcpu(vcpu);
 
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0;
+            ret = 0;
+            break; 
 
         case EXIT_REASON_VMX_PREEMPTION_TIMER_EXPIRED:
        
@@ -349,7 +407,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                     vcpu->vpid, guest_rip);
             
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0; 
+            ret = 0; 
+            break; 
        
         default:
 
@@ -359,7 +418,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             pr_err(" Exit qualification: 0x%llx\n", exit_qualification);
 
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0;
+            ret = 0; 
+            break;  
     }
 
     end_time = ktime_get_ns(); 
@@ -370,5 +430,6 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                        vcpu->regs.rip, 
                        exit_qualification, 
                        duration); 
+    return ret; 
 }
 

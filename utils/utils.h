@@ -42,6 +42,11 @@
         (out_var) = __value;                                              \
     } while (0)
 
+#define RELM_EPT_PRINT_CAP(cap, msg)                \
+    do {                                            \
+        if (ept_vpid_cap & (cap))                   \
+            pr_info("RELM: %s\n", (msg));           \
+    } while (0)
 /* Functions */
 static void* kzalloc_aligned(size_t size, size_t align, gfp_t flags)
 {

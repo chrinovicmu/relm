@@ -57,7 +57,7 @@ struct relm_vm
     uint64_t pml4_gpa; 
 
     struct relm_iommu_context iommu;
-
+    struct fw_cfg_device fw_cfg; 
     int max_vcpus;
     int online_vcpus;
     struct vcpu **vcpus; 

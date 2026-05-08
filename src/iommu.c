@@ -148,15 +148,13 @@ int relm_iommu_map(struct relm_vm *vm,
         return ret;
     }
  
-    /* Track the number of mapped pages for diagnostics.
-     * size / PAGE_SIZE = number of 4 KB pages this call mapped. */
+    /* Track the number of mapped pages .*/
     iommu->n_mapped_pages += size / PAGE_SIZE;
  
     PDEBUG("RELM: IOMMU: mapped IOVA=0x%llx → HPA=0x%llx size=%zu %s\n",
            gpa, hpa, size, write ? "RW" : "RO");
  
     return 0;
-
 }
 
 void relm_iommu_unmap(struct relm_vm *vm, uint64_t gpa, size_t size)
