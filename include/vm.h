@@ -7,6 +7,7 @@
 #include <include/ept.h> 
 #include <include/iommu.h> 
 #include <include/firmware/fw_cfg.h> 
+#include <include/firmware/seabios.h> 
 
 #define RELM_MAX_VCPUS 1  
 #define GUEST_STACK_ORDER 2 
@@ -57,7 +58,7 @@ struct relm_vm
     uint64_t pml4_gpa; 
 
     struct relm_iommu_context iommu;
-    struct fw_cfg_device fw_cfg; 
+    struct relm_firmware_data *fw_data;  
     int max_vcpus;
     int online_vcpus;
     struct vcpu **vcpus; 

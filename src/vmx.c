@@ -22,6 +22,7 @@
 #include <include/vmexit.h>
 #include <include/apic.h>
 #include <include/vmcs_state.h>
+#include <include/firmware/seabios.h>
 #include <utils/utils.h>
 
 static DEFINE_PER_CPU(struct host_cpu *, relm_per_cpu_hcpu); 
@@ -636,10 +637,10 @@ static int relm_setup_cr_controls(struct vcpu *vcpu)
     vcpu->cr4 = (vcpu->cr4 | fixed0) & fixed1; 
 
     /*configure host mask 
-     * if bit is 1 in mask, guest cannot change it withot a vmexit
+     * if bit is set in mask, guest cannot change it withot a vmexit
      * */
 
-    cr0_mask = X86_CR0_PG | X86_CR0_PE | X86_CR0_NE | X86_CR0_CD | X86_CR0_NW;
+    cr0_mask = X86_CR0_PE | X86_CR0_NE | X86_CR0_CD | X86_CR0_NW;
     cr4_mask = X86_CR4_PAE | X86_CR4_PSE;
 
     CHECK_VMWRITE(GUEST_CR0, vcpu->cr0); 
@@ -1603,23 +1604,20 @@ static int relm_setup_host_state(struct vcpu *vcpu)
 
     return 0; 
 }
-
+/**
 static int relm_setup_guest_state(struct vcpu *vcpu)
 {
     if(!vcpu)
         return -EINVAL; 
 
-    /* Control registers */
     CHECK_VMWRITE(GUEST_CR0, vcpu->cr0);
     CHECK_VMWRITE(GUEST_CR3, vcpu->cr3);
     CHECK_VMWRITE(GUEST_CR4, vcpu->cr4);
 
-    /* RIP / RSP / RFLAGS */
     CHECK_VMWRITE(GUEST_RIP, vcpu->regs.rip);
     CHECK_VMWRITE(GUEST_RSP, vcpu->regs.rsp);
-    CHECK_VMWRITE(GUEST_RFLAGS, 0x2); /* reserved bit must be 1 */
+    CHECK_VMWRITE(GUEST_RFLAGS, 0x2); 
 
-    /* Segment selectors (flat) */
     CHECK_VMWRITE(GUEST_CS_SELECTOR, 0x8);
     CHECK_VMWRITE(GUEST_DS_SELECTOR, 0x10);
     CHECK_VMWRITE(GUEST_ES_SELECTOR, 0x10);
@@ -1627,7 +1625,6 @@ static int relm_setup_guest_state(struct vcpu *vcpu)
     CHECK_VMWRITE(GUEST_FS_SELECTOR, 0);
     CHECK_VMWRITE(GUEST_GS_SELECTOR, 0);
 
-    /* Segment bases */
     CHECK_VMWRITE(GUEST_CS_BASE, 0);
     CHECK_VMWRITE(GUEST_DS_BASE, 0);
     CHECK_VMWRITE(GUEST_ES_BASE, 0);
@@ -1635,13 +1632,11 @@ static int relm_setup_guest_state(struct vcpu *vcpu)
     CHECK_VMWRITE(GUEST_FS_BASE, 0);
     CHECK_VMWRITE(GUEST_GS_BASE, 0);
 
-    /* Segment limits */
     CHECK_VMWRITE(GUEST_CS_LIMIT, 0xFFFFFFFF);
     CHECK_VMWRITE(GUEST_DS_LIMIT, 0xFFFFFFFF);
     CHECK_VMWRITE(GUEST_ES_LIMIT, 0xFFFFFFFF);
     CHECK_VMWRITE(GUEST_SS_LIMIT, 0xFFFFFFFF);
 
-    /* Segment access rights (64-bit code/data) */
     CHECK_VMWRITE(GUEST_CS_AR_BYTES, 0xA09B);
     CHECK_VMWRITE(GUEST_DS_AR_BYTES, 0xC093);
     CHECK_VMWRITE(GUEST_ES_AR_BYTES, 0xC093);
@@ -1658,15 +1653,15 @@ static int relm_setup_guest_state(struct vcpu *vcpu)
     CHECK_VMWRITE(GUEST_TR_SELECTOR, 0);
     CHECK_VMWRITE(GUEST_TR_BASE, 0);
     CHECK_VMWRITE(GUEST_TR_LIMIT, 0x67);  // Minimum TSS size
-    CHECK_VMWRITE(GUEST_TR_AR_BYTES, 0x008B);  // Present, Type=TSS Busy
+    CHECK_VMWRITE(GUEST_TR_AR_BYTES, 0x008B);  
     
-    /* GDTR / IDTR */
+    /* GDTR / IDTR 
     CHECK_VMWRITE(GUEST_GDTR_BASE, vcpu->gdtr_base);
     CHECK_VMWRITE(GUEST_GDTR_LIMIT, vcpu->gdtr_limit);
     CHECK_VMWRITE(GUEST_IDTR_BASE, vcpu->idtr_base);
     CHECK_VMWRITE(GUEST_IDTR_LIMIT, vcpu->idtr_limit);
 
-    /* MSRs */
+    /* MSRs 
     CHECK_VMWRITE(GUEST_IA32_EFER, vcpu->efer);
 
     CHECK_VMWRITE(GUEST_ACTIVITY_STATE, 0); 
@@ -1675,7 +1670,120 @@ static int relm_setup_guest_state(struct vcpu *vcpu)
     CHECK_VMWRITE(VMCS_LINK_POINTER, 0xFFFFFFFFFFFFFFFFULL);
     return 0; 
 }
+**/ 
+static int relm_setup_guest_state_firmware(struct vcpu *vcpu)
+{
+    if(!vcpu)
+        return -EINVAL;
+ 
+    uint32_t entry_controls;
+    int ret;
 
+    /* -----------------------------------------------------------------------
+     * VM_ENTRY_CONTROLS: clear IA32E_MODE_GUEST, load EFER on entry.
+     *
+     * We read the current controls (written by relm_setup_vmcs_controls),
+     * clear the IA32E_MODE_GUEST bit (which would force 64-bit mode entry),
+     * and keep all other bits. VM_ENTRY_LOAD_IA32_EFER ensures our
+     * GUEST_IA32_EFER = 0 is loaded into the hardware MSR at VM-entry.
+     * ----------------------------------------------------------------------- */
+    entry_controls  = (uint32_t)__vmread(VM_ENTRY_CONTROLS_FIELD);
+    entry_controls &= ~(uint32_t)VM_ENTRY_IA32E_MODE;  /* clear bit 9 */
+ 
+    CHECK_VMWRITE(VM_ENTRY_CONTROLS_FIELD, entry_controls);
+
+    vcpu->efer = 0;
+    CHECK_VMWRITE(GUEST_IA32_EFER, 0ULL);
+
+    CHECK_VMWRITE(GUEST_CS_SELECTOR, SEABIOS_INITIAL_CS_SELECTOR); /* 0xF000 */
+    CHECK_VMWRITE(GUEST_CS_BASE,     SEABIOS_INITIAL_CS_BASE);     /* 0xFFFF0000 */
+    CHECK_VMWRITE(GUEST_CS_LIMIT,    SEABIOS_INITIAL_CS_LIMIT);    /* 0xFFFF */
+    CHECK_VMWRITE(GUEST_CS_AR_BYTES, SEABIOS_INITIAL_CS_ACCESS);   /* 0x009B */ 
+
+    const uint64_t ds_sel   = SEABIOS_INITIAL_DS_SELECTOR;  /* 0x0000 */
+    const uint64_t ds_base  = SEABIOS_INITIAL_DS_BASE;      /* 0x0000 */
+    const uint64_t ds_limit = SEABIOS_INITIAL_DS_LIMIT;     /* 0xFFFF */
+    const uint64_t ds_ar    = SEABIOS_INITIAL_DS_ACCESS;    /* 0x0093 */
+ 
+    CHECK_VMWRITE(GUEST_DS_SELECTOR, ds_sel); 
+    CHECK_VMWRITE(GUEST_DS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_DS_LIMIT,ds_limit);
+    CHECK_VMWRITE(GUEST_DS_AR_BYTES, ds_ar);
+ 
+    CHECK_VMWRITE(GUEST_ES_SELECTOR, ds_sel);  
+    CHECK_VMWRITE(GUEST_ES_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_ES_LIMIT, ds_limit);
+    CHECK_VMWRITE(GUEST_ES_AR_BYTES, ds_ar);
+ 
+    CHECK_VMWRITE(GUEST_FS_SELECTOR, ds_sel);  
+    CHECK_VMWRITE(GUEST_FS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_FS_LIMIT,    ds_limit);
+    CHECK_VMWRITE(GUEST_FS_AR_BYTES, ds_ar);
+    CHECK_VMWRITE(GUEST_GS_SELECTOR, ds_sel);  
+    CHECK_VMWRITE(GUEST_GS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_GS_LIMIT, ds_limit);
+    CHECK_VMWRITE(GUEST_GS_AR_BYTES, ds_ar);
+ 
+    CHECK_VMWRITE(GUEST_SS_SELECTOR, ds_sel);
+    CHECK_VMWRITE(GUEST_SS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_SS_LIMIT,ds_limit);
+    CHECK_VMWRITE(GUEST_SS_AR_BYTES, ds_ar);
+
+    /*set LDTR to inactive in real mode*/ 
+    CHECK_VMWRITE(GUEST_LDTR_SELECTOR, 0);
+    CHECK_VMWRITE(GUEST_LDTR_BASE,     0);
+    CHECK_VMWRITE(GUEST_LDTR_LIMIT,    0xFFFF);
+    CHECK_VMWRITE(GUEST_LDTR_AR_BYTES, SEABIOS_INITIAL_LDTR_ACCESS); /* 0x10000 unusable */
+
+    CHECK_VMWRITE(GUEST_TR_SELECTOR, 0);
+    CHECK_VMWRITE(GUEST_TR_BASE,     0);
+    CHECK_VMWRITE(GUEST_TR_LIMIT,    0x67);   /* 104 bytes: minimum TSS */
+    CHECK_VMWRITE(GUEST_TR_AR_BYTES, SEABIOS_INITIAL_TR_ACCESS); /* 0x008B busy TSS */
+
+    CHECK_VMWRITE(GUEST_GDTR_BASE,  SEABIOS_INITIAL_GDTR_BASE);  /* 0 */
+    CHECK_VMWRITE(GUEST_GDTR_LIMIT, SEABIOS_INITIAL_GDTR_LIMIT); /* 0xFFFF */
+    CHECK_VMWRITE(GUEST_IDTR_BASE,  SEABIOS_INITIAL_IDTR_BASE);  /* 0 */
+    CHECK_VMWRITE(GUEST_IDTR_LIMIT, 0x3FF); /* real-mode IVT: 1 KB = 256 × 4B */
+
+/* -----------------------------------------------------------------------
+     * RIP, RSP, RFLAGS.
+     *
+     * RIP = 0xFFF0: the offset within CS at the reset vector.
+     *   Linear = CS.base + RIP = 0xFFFF0000 + 0xFFF0 = 0xFFFFFFF0.
+     *   SeaBIOS places a far JMP instruction at this address.
+     *
+     * RSP = 0x0000: stack pointer in real mode starts at 0 within SS.
+     *   SeaBIOS immediately sets up its own stack (typically at 0x9000
+     *   or somewhere in the BIOS data area). The value here is transient.
+     *
+     * RFLAGS = 0x0002: only the architecturally-reserved bit 1 is set.
+     *   IF=0: interrupts disabled at reset. SeaBIOS enables them (STI)
+     *   after its IDT is set up. VM=0: not virtual-8086 mode. TF=0: no
+     *   single-step trap. IOPL=0: I/O permission level 0.
+     * ----------------------------------------------------------------------- */
+    CHECK_VMWRITE(GUEST_RIP,    SEABIOS_INITIAL_RIP);    /* 0xFFF0 */
+    CHECK_VMWRITE(GUEST_RSP,    0ULL);
+    CHECK_VMWRITE(GUEST_RFLAGS, SEABIOS_INITIAL_RFLAGS); /* 0x0002 */
+ 
+    /* Keep vcpu->regs in sync with the VMCS */
+    vcpu->regs.rip    = SEABIOS_INITIAL_RIP;
+    vcpu->regs.rsp    = 0;
+    vcpu->regs.rflags = SEABIOS_INITIAL_RFLAGS;
+
+    CHECK_VMWRITE(GUEST_ACTIVITY_STATE,         0ULL);
+    CHECK_VMWRITE(GUEST_INTERRUPTIBILITY_INFO,  0ULL);
+    CHECK_VMWRITE(GUEST_PENDING_DBG_EXCEPTIONS, 0ULL);
+    CHECK_VMWRITE(VMCS_LINK_POINTER, 0xFFFFFFFFFFFFFFFFULL);
+ 
+    pr_info("RELM: VCPU%d: guest state = 16-bit real mode, "
+            "CS:IP = 0xF000:0xFFF0 → linear 0xFFFFFFF0 (reset vector)\n",
+            vcpu->vpid);
+ 
+    (void)ret;
+    return 0;
+ 
+ 
+}
 void relm_cr3_cache_init(struct cr3_shadow_cache *cache)
 {
     memset(cache, 0, sizeof(cache)); 
@@ -2074,30 +2182,32 @@ int relm_init_vmcs_state(struct vcpu *vcpu)
 
     PDEBUG("RELM: VCPU%d: setting up CR controls (CR0/CR4 constraints)\n",
            vcpu->vpid);
- 
+
     if((ret = relm_setup_cr_controls(vcpu)) != 0)
     {
         pr_err("RELM: VCPU%d: CR controls setup failed: %d\n", vcpu->vpid, ret);
         return -1;
     }
-
+ 
     if((ret = relm_setup_host_state(vcpu)) != 0)
     {
-        pr_err("Host state setup faile : err %d\n", ret); 
-        return -1; 
+        pr_err("RELM: VCPU%d: host state setup failed: %d\n", vcpu->vpid, ret);
+        return -1;
     }
-    if((ret = relm_setup_guest_state(vcpu)) != 0)
+ 
+    if((ret = relm_setup_guest_state_firmware(vcpu)) != 0)
     {
-        pr_err("Guest state setup failed : err %d\n", ret); 
-        return -1; 
+        pr_err("RELM: VCPU%d: firmware guest state setup failed: %d\n",
+               vcpu->vpid, ret);
+        return -1;
     }
-   
+ 
     pr_info("RELM: VCPU%d: VMCS host+guest state written on CPU%d"
             " (CR0=0x%lx CR4=0x%lx RIP=0x%lx RSP=0x%lx)\n",
             vcpu->vpid, smp_processor_id(),
             vcpu->cr0, vcpu->cr4, vcpu->regs.rip, vcpu->regs.rsp);
  
-    return 0; 
+    return 0;
 }
 
 void relm_dump_vcpu(struct vcpu *vcpu)

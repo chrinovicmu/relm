@@ -254,7 +254,7 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                            port, io_val, size);
                 }
 
-                ret = relm_fw_cfg_handle_io(&vm->fw_cfg, port, !is_in, size, &io_val);
+                ret = relm_fw_cfg_handle_io(&vm->fw_data->fw_cfg, port, !is_in, size, &io_val);
 
                 /*guest is reading from fw_cfg*/  
                 if(is_in)
@@ -316,20 +316,83 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
 
         case EXIT_REASON_MSR_WRITE:
         {
-            uint32_t msr = vcpu->regs.rcx & 0xFFFFFFFF;
-            uint64_t value = ((uint64_t)vcpu->regs.rdx << 32) | (vcpu->regs.rax & 0xFFFFFFFF);
+            uint32_t msr = vcpu->regs.rcx & 0xFFFFFFFFULL;
+            uint64_t val = ((uint64_t)vcpu->regs.rdx << 32) | 
+                    (uint64_t)(vcpu->regs.rax & 0xFFFFFFFF);
 
-            pr_info("relm: [VPID=%u] WRMSR 0x%x = 0x%llx at RIP=0x%llx\n",
-                    vcpu->vpid, msr, value, guest_rip);
+            PDEBUG("relm: [VPID=%u] WRMSR 0x%x = 0x%llx at RIP=0x%llx\n",
+                    vcpu->vpid, msr, val, guest_rip);
 
-            /*TODO: emulate MSR write
-             * advance RIP for now*/
+
+            /*handle IA32_EFER MSR index 0xC0000080*/ 
+            if(msr == MSR_IA32_EFER)
+            {
+                /*sanitize bit mask. clear reserved bits and 
+                 * only allow gust writes for valid bits 
+                 * SCE, LME, LMA, NXE*/ 
+                const uint64_t EFER_VALID_MASK = (1ULL << 0)  |  /* SCE */
+                                                  (1ULL << 8)  |  /* LME */
+                                                  (1ULL << 10) |  /* LMA */
+                                                  (1ULL << 11);   /* NXE */
+                val &= EFER_VALID_MASK;
+
+                /*guest must not directly set the LMA bit, it 
+                 * is set by the CPU whem LME+PG is activated. 
+                 * so we clear it*/ 
+                val &= ~(1ULL << 10);
+
+                /*LMA = LME AND CR0.PG*/ 
+                uint64_t guest_cr0 = __vmread(GUEST_CR0); 
+                bool lme = (val & (1ULL << 8)) != 0; 
+                bool pg = (guest_cr0 & (1ULL << 32)) != 0; 
+                bool lma = lma && pg; 
+
+                if(lma)
+                    val != (1ULL << 10); 
+
+                _vmwrite(VMCS_GUEST_IA32_EFER, val); 
+                vcpu->efer = val; 
+
+
+                PDEBUG("RELM: [VPID=%u] WRMSR EFER: LME=%u PG=%u → "
+                        "LMA=%u EFER=0x%llx",
+                        vcpu->vpid, lme ? 1:0, pg ? 1:0, lma ? 1:0, val);
+
+                /*sync IA32_MODE_GUEST in vm-entry controls 
+                 * we update it now, so the very next VMRESUME is in 64 bit long mode.*/
+                uint32_t entry_ctrl = (uint32_t)__vmread(VMCS_ENTRY_CONTROLS); 
+                if(lma)
+                {
+                    /*long mode active: set IA32_MODE_GUEST*/  
+                    entry_ctrl |= VMCS_ENTRY_IA32E_MODE;
+                    PDEBUG("RELM: [VPID=%u] IA32E_MODE_GUEST → 1 "
+                            "(guest entered 64-bit long mode)", vcpu->vpid);
+                }else{
+                    /*long mode not active : clear IA32E_MODE_GUEST*/ 
+                    entry_ctrl = &= ~(uint32_t)VMCS_ENTRY_IA32E_MODE; 
+                }
+                _vmwrite(VMCS_ENTRY_CONTROLS, entry_ctrl); 
+            }
+            else{
+
+                /*TODO
+                 * Emulate Other MSRs writes 
+                 *  add cases for:
+                 *  MSR_STAR / MSR_LSTAR / MSR_CSTAR: SYSCALL targets
+                 *  MSR_FS_BASE / MSR_GS_BASE: segment bases
+                 *  MSR_IA32_APIC_BASE: APIC relocation */
+
+            PDEBUG("RELM: [VPID=%u] WRMSR MSR=0x%08x ignored "
+                       "(not emulated)", vcpu->vpid, msr);
+            }
+
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
 
             ret = 1;
             break; 
         }
+
 
         case EXIT_REASON_EPT_VIOLATION:
         {
