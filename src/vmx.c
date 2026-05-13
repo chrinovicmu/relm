@@ -1687,10 +1687,10 @@ static int relm_setup_guest_state_firmware(struct vcpu *vcpu)
      * and keep all other bits. VM_ENTRY_LOAD_IA32_EFER ensures our
      * GUEST_IA32_EFER = 0 is loaded into the hardware MSR at VM-entry.
      * ----------------------------------------------------------------------- */
-    entry_controls  = (uint32_t)__vmread(VM_ENTRY_CONTROLS_FIELD);
+    entry_controls  = (uint32_t)__vmread(VMCS_ENTRY_CONTROLS);
     entry_controls &= ~(uint32_t)VM_ENTRY_IA32E_MODE;  /* clear bit 9 */
  
-    CHECK_VMWRITE(VM_ENTRY_CONTROLS_FIELD, entry_controls);
+    CHECK_VMWRITE(VMCS_ENTRY_CONTROLS, entry_controls);
 
     vcpu->efer = 0;
     CHECK_VMWRITE(GUEST_IA32_EFER, 0ULL);

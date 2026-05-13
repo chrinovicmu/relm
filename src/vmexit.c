@@ -350,7 +350,7 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                 if(lma)
                     val != (1ULL << 10); 
 
-                _vmwrite(VMCS_GUEST_IA32_EFER, val); 
+                _vmwrite(GUEST_IA32_EFER, val); 
                 vcpu->efer = val; 
 
 
@@ -364,12 +364,12 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                 if(lma)
                 {
                     /*long mode active: set IA32_MODE_GUEST*/  
-                    entry_ctrl |= VMCS_ENTRY_IA32E_MODE;
+                    entry_ctrl |= VM_ENTRY_IA32E_MODE;
                     PDEBUG("RELM: [VPID=%u] IA32E_MODE_GUEST → 1 "
                             "(guest entered 64-bit long mode)", vcpu->vpid);
                 }else{
                     /*long mode not active : clear IA32E_MODE_GUEST*/ 
-                    entry_ctrl = &= ~(uint32_t)VMCS_ENTRY_IA32E_MODE; 
+                    entry_ctrl &= ~(uint32_t)VM_ENTRY_IA32E_MODE; 
                 }
                 _vmwrite(VMCS_ENTRY_CONTROLS, entry_ctrl); 
             }

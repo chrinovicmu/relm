@@ -15,7 +15,6 @@
 #include <include/vm.h>
 #include <include/firmware/e820.h>
 #include <include/firmware/fw_cfg.h>
-#include <stdint.h>
 #include <utils/utils.h>
 
 
@@ -23,7 +22,7 @@ static const uint8_t fw_cfg_signature[4] = {'Q', 'E', 'M', 'U'};
 
 void relm_fw_cfg_init(struct fw_cfg_device *fw) 
 {
-    memset(fw, 0, siezeof(*fw)); 
+    memset(fw, 0, sizeof(*fw)); 
     
     spin_lock_init(&fw->lock); 
 
@@ -51,12 +50,12 @@ void relm_fw_cfg_destroy(struct fw_cfg_device *fw)
  
     fw->item_count = 0;
     fw->selected   = NULL;
-    fw->initialised = false;
+    fw->initialized = false;
  
     spin_unlock(&fw->lock);
 }
 
-int relm_fe_cfg_register(struct fw_cfg_device *fw, 
+int relm_fw_cfg_register(struct fw_cfg_device *fw, 
                          uint16_t key, 
                          const char *name, 
                          const void *data, 
@@ -65,7 +64,7 @@ int relm_fe_cfg_register(struct fw_cfg_device *fw,
     struct fw_cfg_item *item; 
     uint32_t slot; 
 
-    if(!fw || !fw->initialised)
+    if(!fw || !fw->initialized)
     {
         pr_err("RELM:firmware:fw_cfg: register called on uninitialised device\n");
         return -EINVAL;
@@ -116,7 +115,7 @@ int relm_fe_cfg_register(struct fw_cfg_device *fw,
         memcpy(item->data, data, size); 
     }
     else {
-        item->data = NULL 
+        item->data = NULL; 
     }
 
     item->key = key; 
@@ -257,7 +256,7 @@ int relm_fw_cfg_setup(struct fw_cfg_device *fw, struct relm_vm *vm)
     uint8_t uuid[16]; 
     int ret; 
 
-    if(!fw->initialised)
+    if(!fw->initialized)
     {
         pr_err("RELM:firmware:fw_cfg: setup called on uninitialised device\n");
         return -EINVAL;

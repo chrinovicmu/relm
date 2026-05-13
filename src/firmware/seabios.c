@@ -36,7 +36,7 @@ int relm_seabios_load(struct relm_vm *vm, struct device *dev)
     uint64_t gpa, hpa; 
     int ret; 
 
-    ret = request_firmware(&fw, SEABIO_FIRMWARE_NAME, dev); 
+    ret = request_firmware(&fw, SEABIOS_FIRMWARE_NAME, dev); 
     if(ret)
     {
         pr_err("RELM: SeaBIOS: failed to load '%s' (error %d)\n"
@@ -59,7 +59,7 @@ int relm_seabios_load(struct relm_vm *vm, struct device *dev)
 
 
     seabios_va = (void *)__get_free_pages(GFP_KERNEL |
-                                          _GFP_ZERO, page_order); 
+                                          __GFP_ZERO, page_order); 
     if(!seabios_va)
     {
         pr_err("RELM: SeaBIOS: failed to allocate %llu KB for ROM image\n",
@@ -73,13 +73,13 @@ int relm_seabios_load(struct relm_vm *vm, struct device *dev)
     release_firmware(fw); 
     fw = NULL; 
 
-    vm->fw_data->seabios_va = seabios_va; 
-    vm->fw_data->seabios_pa = seabios_pa; 
+    vm->fw_data->seabios_hva = seabios_va; 
+    vm->fw_data->seabios_hpa = seabios_pa; 
 
     /*map seabios into guest GPA */ 
     for(offset = 0; offset < SEABIOS_SIZE; offset += PAGE_SIZE)
     {
-        gpa = SEABIO_ROM_TOP_GPA + offset; 
+        gpa = SEABIOS_ROM_TOP_GPA + offset; 
         hpa = seabios_pa + offset; 
 
         ret = relm_ept_map_page(vm->ept, gpa, hpa, SEABIOS_EPT_FLAGS);
@@ -100,33 +100,47 @@ int relm_seabios_load(struct relm_vm *vm, struct device *dev)
 
 void relm_seabios_unload(struct relm_vm *vm)
 {
-    if(vm->seabios_host_va)
+    if(vm->fw_data->seabios_hva)
     {
-        free_pages((unsigned long)vm->seabios_host_va,
+        free_pages((unsigned long)vm->fw_data->seabios_hva,
                    get_order(SEABIOS_SIZE));
-        vm->seabios_host_va = NULL;
-        vm->seabios_host_pa = 0;
+        vm->fw_data->seabios_hva = NULL;
+        vm->fw_data->seabios_hpa = 0;
  
         pr_info("RELM: SeaBIOS: ROM pages freed\n");
     }
 }
 
-/*set VCPU is 16-bit real mode for x86 architectural reset*/  
-int relm_seabios_set_vcpu_state(struct vcpu *vcpu)
+int relm_seabios_setup(struct relm_vm *vm, struct device *dev)
 {
-    uint32_t current_entry_controls; 
-    uint32_t new_entry_controls;
-    int ret; 
-
-
-    /* SEABIOS_INITIAL_CR0 = 0x60000010
-     * chaching disabled*/ 
-    _vmwrite(GUEST_CR0, SEABIOS_INITIAL_CR0);
-    _vmwrite(GUEST_CR4, SEABIOS_INITIAL_CR4);
-    _vmwrite(GUEST_CR3, 0ULL);
-    _vmwrite(VMCS_GUEST_IA32_EFER, SEABIOS_INITIAL_EFER);
-
-    current_entry_controls = (uint32_t)__vmread(VM_ENTR)
+    int ret;
+ 
+    ret = relm_seabios_load(vm, dev);
+    if(ret)
+    {
+        pr_err("RELM: SeaBIOS setup: failed to load binary: %d\n", ret);
+        return ret;
+    }
+ 
+    /* Step 2: Register all fw_cfg items SeaBIOS will read during boot */
+    ret = relm_fw_cfg_setup(&vm->fw_data->fw_cfg, vm);
+    if(ret)
+    {
+        pr_err("RELM: SeaBIOS setup: failed to setup fw_cfg: %d\n", ret);
+        relm_seabios_unload(vm);
+        return ret;
+    }
+ 
+    pr_info("RELM: SeaBIOS setup complete.\n");
+    pr_info("RELM: VCPU real-mode state will be set in Phase 2 "
+            "(relm_seabios_set_vcpu_state in vmcs_setup).\n");
+    pr_info("RELM: Boot sequence:\n");
+    pr_info("  1. CPU fetches 0xFFFFFFF0 → SeaBIOS reset code\n");
+    pr_info("  2. SeaBIOS reads fw_cfg (ports 0x510/0x511)\n");
+    pr_info("  3. SeaBIOS reads 'etc/e820' → builds memory map\n");
+    pr_info("  4. SeaBIOS scans for bootable disk / direct kernel boot\n");
+    pr_info("  5. OS kernel starts, reads e820 via INT 0x15, AX=0xE820\n");
+ 
+    return 0;
 }
-
 

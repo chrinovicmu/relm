@@ -22,7 +22,7 @@ struct relm_vm;
 #define E820_TYPE_NVS       4
 
 /*unsable*/ 
-#define E820_TYPE_UNSUSABLE 5 
+#define E820_TYPE_UNUSABLE 5 
 
 /*persistent memory*/ 
 #define E820_TYPE_PMEM      7 
@@ -37,7 +37,7 @@ struct e820_entry
 
 
 /*620 KB conventional mmeory uppper boundary */ 
-#define RELM_E820_CONV_MEM_END  0x000A0000ULL; 
+#define RELM_E820_CONV_MEM_END  0x000A0000ULL 
 
 /*384 KB VGA/BIOS region*/  
 #define RELM_E820_VGA_RESERVED_BASE 0x000A0000ULL
@@ -47,15 +47,15 @@ struct e820_entry
 #define RELM_E820_EXTENDED_BASE     0x00100000ULL 
 
 /*SeaBIOS ROM at the top of 4 GB (0xFFFE0000-0xFFFFFFFF, 128 KB) */ 
-#define RELM_E820_BIOS_ROM_BASE     0xFFFE0000ULL; 
+#define RELM_E820_BIOS_ROM_BASE     0xFFFE0000ULL 
 #define RELM_E820_BIOS_ROM_SIZE     (128 * 1024ULL)
 #define RELM_E820_BIOS_ROM_END      (RELM_E820_BIOS_ROM_BASE + RELM_E820_BIOS_ROM_SIZE)
 
-#define RELM_E820_MAX_ENTIRES       8   
+#define RELM_E820_MAX_ENTRIES       8   
 
 struct relm_e820_map 
 {
-    struct e820_entry entries[RELM_E820_MAX_ENTIRES]; 
+    struct e820_entry entries[RELM_E820_MAX_ENTRIES]; 
     uint32_t count; 
 }; 
 

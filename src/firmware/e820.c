@@ -12,7 +12,6 @@
  
 #include <include/vm.h>
 #include <include/firmware/e820.h>
-#include <stdint.h>
 #include <utils/utils.h>
 
 

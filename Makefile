@@ -27,6 +27,9 @@ $(MODULE_NAME)-y := \
     src/ept.o         \
     src/apic.o        \
 	src/iommu.o 	  \
+	src/firmware/e820.o \
+	src/firmware/fw_cfg.o \
+	src/firmware/seabios.o \
     guest/guest_kernel_embed.o
 
 .PHONY: all modules clean

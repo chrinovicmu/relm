@@ -12,7 +12,7 @@ struct relm_vm;
 #define FW_CFG_ID               0x0001 
 #define FW_CFG_UUID             0x0002 
 #define FW_CFG_RAM_SIZE         0x0003 
-#define FW_CFG_NOGRAPHC         0x0004
+#define FW_CFG_NOGRAPHIC        0x0004
 #define FW_CFG_NB_CPUS          0x0005 
 #define FW_CFG_MACHINE_ID       0x0006
 #define FW_CFG_KERNEL_ADDR      0x0007 
@@ -44,6 +44,7 @@ struct fw_cfg_file
  * 32 is generous for a minimal implementation. */
 #define FW_CFG_MAX_ITEMS        32
 #define FW_CFG_MAX_NAME_LEN     55
+#define FW_CFG_MAX_ITEM_SIZE    (4 * 1024)
 
 struct fw_cfg_item
 {
@@ -63,7 +64,7 @@ struct fw_cfg_device
     uint16_t next_file_key; 
     struct relm_e820_map e820_map; 
     spinlock_t lock; 
-    bool initialize; 
+    bool initialized; 
 };
 
 struct fw_cfg_file_dir {
@@ -107,7 +108,7 @@ int relm_fw_cfg_register_file(struct fw_cfg_device *fw,
 
 /*high level function thta populates the fw_cfg device with 
     * everything SeaBIOS needs */ 
-int relm_cfg_setup(struct fw_cfg_device *fw, struct relm_vm *vm); 
+int relm_fw_cfg_setup(struct fw_cfg_device *fw, struct relm_vm *vm); 
 
 /*handle wrtie to port 0x510 */ 
 void relm_fw_cfg_select(struct fw_cfg_device *fw, uint16_t key); 

@@ -32,7 +32,7 @@ struct vcpu;
 #define SEABIOS_INITIAL_CS_BASE     0xFFFF0000ULL
 
 /*64 kb after the base */ 
-#define SEABIOS_INITIAL_CS_LIIMIT   0x0000FFFFUL
+#define SEABIOS_INITIAL_CS_LIMIT   0x0000FFFFUL
 #define SEABIOS_INITIAL_CS_ACCESS   0x0000009BUL 
 
 /* IP at reset = 0xFFF0. Linear = CS.base + IP = 0xFFFF0000 + 0xFFF0 = 0xFFFFFFF0 */
@@ -81,14 +81,14 @@ struct vcpu;
 
 struct relm_firmware_data 
 {
-    uint64_t seabios_va; 
-    uint64_t seabios_pa; 
+    uint64_t seabios_hva; 
+    uint64_t seabios_hpa; 
     struct fw_cfg_device fw_cfg;  
 }; 
 
 /*relm_seabios_load - load the SeaBIOS binary and map it into the guest EPT */ 
 int relm_seabios_load(struct relm_vm *vm, struct device *dev); 
-void relm_seabios_unload(struct relm_vm *vm, struct device *dev); 
+void relm_seabios_unload(struct relm_vm *vm); 
 
 /*configure a VCPU's initial state for SeaBIOS */ 
 int relm_seabios_set_vcpu_state(struct vcpu *vcpu); 
