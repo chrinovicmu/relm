@@ -2,6 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/platform_device.h> 
 
 #include <include/vmx.h>
 #include <include/vm.h>
@@ -12,12 +13,7 @@
 #include <utils/utils.h>
 
 static struct relm_vm *my_vm = NULL; 
-
-#define GUEST_CODE_GPA 0x1000ULL 
-#define GUEST_STACK_TOP(vm) (((vm)->total_guest_ram - 16ULL) & ~0xFULL)
-
-extern const uint8_t guest_kernel_bin[]; 
-extern const uint8_t guest_kernel_bin_end[]; 
+static struct platform_device *relm_pdev = NULL; 
 
 static int __init relm_module_init(void)
 {
@@ -26,18 +22,11 @@ static int __init relm_module_init(void)
     int vpid = 1;
     struct vcpu *vcpu; 
 
-    const size_t guest_kernel_size = 
-        (size_t)(guest_kernel_bin_end - guest_kernel_bin); 
-
-    pr_info("RELM: guest kernel: %zu bytes at kernel VA %p\n",
-            guest_kernel_size, guest_kernel_bin);
-
     if(!relm_vmx_support())
     {
         pr_err("RELM: VMX is not surppoted on hardware"); 
-        return -1; 
+        return -ENODEV; 
     }
-    PDEBUG("RELM: VMX is surppoted\n"); 
 
     ret = relm_vmx_enable_on_all_cpus();
     if (ret) 
@@ -45,57 +34,77 @@ static int __init relm_module_init(void)
         pr_err("RELM: Failed to enable VMX on all CPUs: %d\n", ret);
         return ret;
     }
-    pr_info("RELM: VMX enabled on all CPUs\n");
+    PDEBUG("RELM: VMX enabled on all CPUs\n");
 
-    my_vm = relm_create_vm(vm_id, "Test-VM-01", (uint64_t)RELM_VM_GUEST_RAM_SIZE); 
+    relm_pdev = platform_device_register_simple("relm", 0, NULL, 0); 
+    if(IS_ERR(relm_pdev))
+    {
+        ret = PTR_ERR(relm_pdev);
+        relm_pdev = NULL;
+        pr_err("RELM: Failed to register platform device: %d\n", ret);
+        goto _cleanup_vmx;
+    }
+
+    PDEBUG("RELM: Platform device registered (/sys/devices/platform/relm.0)\n");
+    
+    my_vm = relm_create_vm(vm_id, "RELM-VM-01", (uint64_t)RELM_VM_GUEST_RAM_SIZE);
     if(!my_vm)
     {
-        pr_err("RELM: VM creation failed - out of memory or EPT srtup failed\n"); 
-        return -ENOMEM; 
+        pr_err("RELM: VM creation failed (out of memory?)\n");
+        ret = -ENOMEM;
+        goto _cleanup_pdev;
+    }
+    pr_info("RELM: VM '%s' created: %llu MB guest RAM, EPT EPTP=0x%llx\n",
+            my_vm->vm_name,
+            my_vm->total_guest_ram / (1024 * 1024),
+            my_vm->ept->eptp);
+
+
+    relm_fw_cfg_init(&my_vm->fw_data->fw_cfg); 
+
+    ret = relm_iommu_init(my_vm, &relm_pdev->dev);
+    if(ret)
+    {
+        pr_warn("RELM: IOMMU init failed (%d) — device pass-through disabled\n"
+                "  (This is expected if VT-d is disabled in BIOS)\n", ret);
+        /* Not fatal — continue without IOMMU. Guest can still run via EPT alone. */
+        ret = 0;
     }
 
-    pr_info("VM created!!!\n");
-    
-    ret = relm_vm_add_vcpu(my_vm, vpid);
-    if (ret != 0) 
+    ret = relm_seabios_setup(my_vm, &relm_pdev->dev);
+    if(ret)
     {
-        pr_err("RELM: Failed to add VCPU with VPID %d (error: %d)\n", 
-               vpid, ret);
-        return -1; 
+        pr_err("RELM: SeaBIOS setup failed: %d\n"
+               "  Ensure /lib/firmware/seabios/bios.bin exists:\n"
+               "    apt install seabios\n"
+               "    mkdir -p /lib/firmware/seabios\n"
+               "    cp /usr/share/seabios/bios.bin /lib/firmware/seabios/bios.bin\n",
+               ret);
         goto _cleanup_vm;
     }
-    
-    pr_info("RELM: VCPU %d added successfully, starting VM...\n", vpid);
+    pr_info("RELM: SeaBIOS loaded and fw_cfg populated\n");
 
 
-    PDEBUG("RELM: Loading guest kernel image (%zu bytes) to GPA 0x1000...\n", 
-           guest_kernel_size); 
- 
-    ret = relm_vm_copy_to_guest(my_vm, GUEST_CODE_GPA, guest_kernel_bin, guest_kernel_size);
-    if(ret < 0)
+    if(my_vm->iommu.enabled)
     {
-        pr_err("RELM: Failed to load guest kernel intp guest RAM: %d\n", ret); 
-        goto _cleanup_vm; 
+        ret = relm_iommu_map_guest_ram(my_vm);
+        if(ret)
+        {
+            pr_err("RELM: IOMMU RAM mapping failed: %d\n", ret);
+            goto _cleanup_vm;
+        }
+        pr_info("RELM: Guest RAM mirrored into IOMMU domain\n");
     }
 
-    PDEBUG("RELM: Guest kernel (%zu bytes) loaded at GPA 0x%llx\n",
-            guest_kernel_size, GUEST_CODE_GPA);
-
-    vcpu = relm_vm_get_vcpu(my_vm, vpid); 
-    if(!vcpu)
+    ret = relm_vm_add_vcpu(my_vm, vpid);
+    if(ret != 0)
     {
-        pr_err("RELM: Cannot retrieve VCPU VPID=%d after creation\n", vpid); 
-        ret = -ENOENT; 
-        goto _cleanup_vm; 
+        pr_err("RELM: Failed to add VCPU %d: %d\n", vpid, ret);
+        goto _cleanup_vm;
     }
+    pr_info("RELM: VCPU %d created (Phase 1 complete)\n", vpid); 
 
-    vcpu->regs.rip = GUEST_CODE_GPA;
-    vcpu->regs.rsp = GUEST_STACK_TOP(my_vm); 
 
-    pr_info("RELM: Guest initial state: RIP=0x%lx RSP=0x%lx\n",
-            vcpu->regs.rip, vcpu->regs.rsp);
- 
- 
     ret = relm_run_vm(my_vm);
     if (ret != 0)
     {
@@ -103,42 +112,58 @@ static int __init relm_module_init(void)
         goto _cleanup_vm;
     }
  
-    pr_info("RELM: VM is now running!\n");
-    pr_info("RELM: Module initialization complete\n");
-   
-    return 0;
+    pr_info("RELM: ====================================================\n");
+    pr_info("RELM: VM '%s' is running\n", my_vm->vm_name);
+    pr_info("RELM: Guest entry: 16-bit real mode at CS=0xF000 IP=0xFFF0\n");
+    pr_info("RELM:              (linear 0xFFFFFFF0 = SeaBIOS reset vector)\n");
+    pr_info("RELM: SeaBIOS will read fw_cfg, build e820, boot from disk\n");
+    pr_info("RELM: ====================================================\n");
+ 
+    return 0;  
 
 _cleanup_vm:
-    pr_err("RELM: Cleaning up VM due to initialization failure\n");
     relm_destroy_vm(my_vm);
     my_vm = NULL;
-    return ret; 
+_cleanup_pdev:
+    platform_device_unregister(relm_pdev);
+    relm_pdev = NULL;
+_cleanup_vmx:
+    relm_vmx_disable_on_all_cpus();
+    return ret;
 }
-
+ 
 static void __exit relm_module_exit(void)
 {
-    
-    pr_info("RELM: Shutting down hypervisor...\n");
-
+    pr_info("RELM: Shutting down\n");
+ 
+    /* Stop and destroy the VM first — IOMMU detach, device quiesce,
+     * VCPU halt, RAM free all happen inside relm_destroy_vm. */
     if(my_vm)
     {
-        pr_info("RELM: Stopping VM...\n");
         relm_stop_vm(my_vm);
-        
+ 
         if(my_vm->ops && my_vm->ops->print_stats)
-            my_vm->ops->print_stats(my_vm); 
-
-        pr_info("RELM: Destroying VM...\n");
-        relm_destroy_vm(my_vm); 
-        my_vm = NULL; 
+            my_vm->ops->print_stats(my_vm);
+ 
+        relm_iommu_dump_stats(my_vm);
+ 
+        relm_destroy_vm(my_vm);
+        my_vm = NULL;
     }
-    else{
-        pr_info("RELM: No VM to clean\n"); 
+ 
+    /* Destroy the firmware-loading platform device. */
+    if(relm_pdev)
+    {
+        platform_device_unregister(relm_pdev);
+        relm_pdev = NULL;
     }
-      
-    pr_info("RELM: Module unloaded succesffully\n"); 
+ 
+    /* VMXOFF on every CPU — must come last, after all VMs are destroyed.
+     * Any pending VMCS must be cleared (VMCLEAR) before VMXOFF. */
+    relm_vmx_disable_on_all_cpus();
+    pr_info("RELM: Module unloaded\n");
 }
-
+ 
 module_init(relm_module_init); 
 module_exit(relm_module_exit);
 
