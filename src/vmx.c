@@ -1782,7 +1782,7 @@ static int relm_setup_guest_state_firmware(struct vcpu *vcpu)
 }
 
 /*Set up guest initial state  in long mode */ 
-static int relm_setup_guest_state_longmode()
+static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
 {
     uint32_t entry_controls;
     uint64_t cr0_fixed0, cr0_fixed1;

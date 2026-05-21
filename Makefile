@@ -14,8 +14,6 @@ PWD     := $(shell pwd)
 obj-m      := $(MODULE_NAME).o
 ccflags-y  := -I$(src) -I$(src)/utils
 
-# FIX: Tell the assembler to look for .incbin files in your local guest/ folder.
-# We use $(src) which is the kbuild-safe way to reference your source.
 asflags-y  := -I$(src)/guest
 
 $(MODULE_NAME)-y := \
@@ -30,6 +28,7 @@ $(MODULE_NAME)-y := \
 	src/firmware/e820.o \
 	src/firmware/fw_cfg.o \
 	src/firmware/seabios.o \
+	src/boot/linux_loader.o \
     guest/guest_kernel_embed.o
 
 .PHONY: all modules clean

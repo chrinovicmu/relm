@@ -9,6 +9,7 @@
 #include <include/ept.h>
 #include <include/vmx_ops.h>
 #include <include/vmexit.h>
+#include <include/boot/linux_loader.h>
 #include <include/vmcs_state.h>
 #include <utils/utils.h>
 
@@ -71,6 +72,7 @@ static int __init relm_module_init(void)
         ret = 0;
     }
 
+    /*igonored old firmware seutp *
     ret = relm_seabios_setup(my_vm, &relm_pdev->dev);
     if(ret)
     {
@@ -83,7 +85,21 @@ static int __init relm_module_init(void)
         goto _cleanup_vm;
     }
     pr_info("RELM: SeaBIOS loaded and fw_cfg populated\n");
+*/ 
 
+     /* Direct Linux/x86 boot — no SeaBIOS. We load the bzImage, build the
+     * boot_params zero page (e820 + cmdline + initrd ptrs), and the VMCS
+     * will enter the guest straight at startup_64 in 64-bit long mode. */
+    ret = relm_linux_loader_setup(my_vm, &relm_pdev->dev, NULL);
+    if(ret)
+    {
+        pr_err("RELM: linux_loader setup failed: %d\n"
+               "  Place a bzImage at /lib/firmware/%s\n"
+               "  (optional initrd at /lib/firmware/%s)\n",
+               ret, RELM_KERNEL_FW_NAME, RELM_INITRD_FW_NAME);
+        goto _cleanup_vm;
+    }
+    pr_info("RELM: linux_loader complete (kernel + boot_params in guest RAM)\n");
 
     if(my_vm->iommu.enabled)
     {

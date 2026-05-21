@@ -406,7 +406,7 @@ int relm_ept_map_range(struct ept_context *ept, uint64_t gpa_start,
 }
 
 /*walks EPT table to find the leaf entry and clear it */ 
-int relm_unmap_page(struct ept_context *ept, uint64_t gpa)
+int relm_ept_unmap_page(struct ept_context *ept, uint64_t gpa)
 {
     ept_pdpt_t *pdpt; 
     ept_pd_t *pd; 

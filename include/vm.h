@@ -54,8 +54,11 @@ struct relm_vm
     struct ept_context *ept; 
     uint64_t total_guest_ram; 
 
-    /*for guest page tables */ 
+    /*guest page tables */ 
     uint64_t pml4_gpa; 
+
+    uint64_t kernel_entry_gpa; 
+    uint64_t boot_params_gpa; 
 
     struct relm_iommu_context iommu;
     struct relm_firmware_data *fw_data;  

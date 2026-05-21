@@ -174,6 +174,68 @@ _cleanup:
     return ret;
 }
 
+int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa, 
+                            uint64_t hpa, uint64_t size)
+{
+    struct guest_mem_region *region; 
+    uint64_t num_pages; 
+    uint64_t i; 
+    uint64_t mmio_flags; 
+    uint64_t current_gpa, current_hpa; 
+    int ret; 
+
+    if(!vm || !vm->ept)
+        return -EINVAL; 
+
+    if(size == 0)
+        return -EINVAL; 
+
+    if(gpa & ~PAGE_MASK || (hpa & ~PAGE_MASK) || (size & ~PAGE_MASK)){
+        pr_err("RELM: MMIO region not page-aligned "
+               "(gpa=0x%llx hpa=0x%llx size=0x%llx)\n", 
+               gpa, hpa, size); 
+        return -EINVAL; 
+    }
+
+    num_pages = size / PAGE_SIZE; 
+    mmio_flags = EPT_ACCESS_READ | EPT_ACCESS_WRITE | EPT_MEMTYPE_UC | EPT_IGNORE_PAT; 
+
+    pr_info("RELM: Mapping MMIO region GPA 0x%llx -> HPA 0x%llx (%llu pages)\n", 
+            gpa, hpa, num_pages); 
+    region = kzalloc(sizeof(*region), GFP_KERNEL); 
+    if(!region)
+        return -ENOMEM; 
+
+    region->gpa_start = gpa; 
+    region->size = size; 
+    region->pages = NULL; 
+    region->nr_pages = num_pages; 
+    region->flags = mmio_flags; 
+
+    for(i =0; i < num_pages; i++)
+    {
+        current_gpa = gpa + (i * PAGE_SIZE); 
+        current_hpa = hpa + (i * PAGE_SIZE);
+
+        ret = relm_ept_map_page(vm->ept, current_gpa, current_hpa, mmio_flags); 
+        if(ret < 0){
+            pr_err("RELM: Failed to map MMIO page GPA 0x%llx -> HPA 0x%llx (%d)\n", 
+                   current_gpa, current_hpa, ret); 
+            goto _cleanup; 
+        }
+    }
+
+    region->next = vm->mem_regions; 
+    vm->mem_regions = region; 
+    pr_info("RELM: MMIO region mapped successfully\n"); 
+
+_cleanup:
+    while(i--)
+        relm_ept_unmap_page(vm->ept, gpa + (i * PAGE_SIZE)); 
+    kfree(region); 
+    return ret; 
+}
+
 void relm_vm_free_guest_mem(struct relm_vm *vm)
 {
     struct guest_mem_region *region;
