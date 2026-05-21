@@ -624,7 +624,7 @@ static int relm_setup_cr_controls(struct vcpu *vcpu)
     fixed1 = __rdmsr1(MSR_IA32_VMX_CR0_FIXED1);
 
     /*Initial state: paging (PG), Protected Mode (PE), Numeric Error(NE) */ 
-    vcpu->cr0 = X86_CR0_PG | X86_CR0_PE | X86_CR0_NE; 
+    vcpu->cr0 = X86_CR0_PG | X86_CR0_PE | X86_CR0_NE | X86_CR0_WP; 
 
     /*hardware sanitation */ 
     vcpu->cr0 = (vcpu->cr0 | fixed0) & fixed1; 
@@ -1604,7 +1604,7 @@ static int relm_setup_host_state(struct vcpu *vcpu)
 
     return 0; 
 }
-/**
+
 static int relm_setup_guest_state(struct vcpu *vcpu)
 {
     if(!vcpu)
@@ -1655,13 +1655,11 @@ static int relm_setup_guest_state(struct vcpu *vcpu)
     CHECK_VMWRITE(GUEST_TR_LIMIT, 0x67);  // Minimum TSS size
     CHECK_VMWRITE(GUEST_TR_AR_BYTES, 0x008B);  
     
-    /* GDTR / IDTR 
     CHECK_VMWRITE(GUEST_GDTR_BASE, vcpu->gdtr_base);
     CHECK_VMWRITE(GUEST_GDTR_LIMIT, vcpu->gdtr_limit);
     CHECK_VMWRITE(GUEST_IDTR_BASE, vcpu->idtr_base);
     CHECK_VMWRITE(GUEST_IDTR_LIMIT, vcpu->idtr_limit);
 
-    /* MSRs 
     CHECK_VMWRITE(GUEST_IA32_EFER, vcpu->efer);
 
     CHECK_VMWRITE(GUEST_ACTIVITY_STATE, 0); 
@@ -1670,7 +1668,7 @@ static int relm_setup_guest_state(struct vcpu *vcpu)
     CHECK_VMWRITE(VMCS_LINK_POINTER, 0xFFFFFFFFFFFFFFFFULL);
     return 0; 
 }
-**/ 
+
 static int relm_setup_guest_state_firmware(struct vcpu *vcpu)
 {
     if(!vcpu)
@@ -1781,9 +1779,137 @@ static int relm_setup_guest_state_firmware(struct vcpu *vcpu)
  
     (void)ret;
     return 0;
- 
- 
 }
+
+/*Set up guest initial state  in long mode */ 
+static int relm_setup_guest_state_longmode()
+{
+    uint32_t entry_controls;
+    uint64_t cr0_fixed0, cr0_fixed1;
+    uint64_t cr4_fixed0, cr4_fixed1;
+    uint64_t cr0, cr4, efer;
+    uint64_t entry_rip;
+    uint64_t entry_rsi;
+
+    if(!vcpu || !vcpu->vm)
+        return -EINVAL;
+
+    /*enter as a 64 bit IA-32e guest */ 
+    entry_controls  = (uint32_t)__vmread(VMCS_ENTRY_CONTROLS);
+    entry_controls |= VM_ENTRY_IA32E_MODE;          
+    CHECK_VMWRITE(VMCS_ENTRY_CONTROLS, entry_controls);
+
+    if(!vcpu->vm->pml4_gpa)
+    {
+        pr_err("RELM: VCPU%d: longmode: vm->pml4_gpa not set\n", vcpu->vpid);
+        return -EINVAL;
+    }
+    CHECK_VMWRITE(GUEST_CR3, vcpu->vm->pml4_gpa);
+    vcpu->cr3 = vcpu->vm->pml4_gpa;
+
+    efer = EFER_LME | EFER_LMA | EFER_SCE;
+    CHECK_VMWRITE(GUEST_IA32_EFER, efer);
+    vcpu->efer = efer;
+
+    CHECK_VMWRITE(GUEST_CS_SELECTOR, 0x0008);
+    CHECK_VMWRITE(GUEST_CS_BASE, 0);
+    CHECK_VMWRITE(GUEST_CS_LIMIT, 0xFFFFFFFFU);
+    CHECK_VMWRITE(GUEST_CS_AR_BYTES, 0xA09B);   /* P=1 S=1 type=B G=1 L=1 */
+
+    const uint64_t ds_sel = 0x0010;
+    const uint64_t ds_base = 0;
+    const uint64_t ds_limit = 0xFFFFFFFFU;
+    const uint64_t ds_ar = 0xC093;  /* P=1 S=1 type=3 G=1 B=1 */
+
+    CHECK_VMWRITE(GUEST_DS_SELECTOR, ds_sel);
+    CHECK_VMWRITE(GUEST_DS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_DS_LIMIT, ds_limit);
+    CHECK_VMWRITE(GUEST_DS_AR_BYTES, ds_ar);
+
+    CHECK_VMWRITE(GUEST_ES_SELECTOR, ds_sel);
+    CHECK_VMWRITE(GUEST_ES_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_ES_LIMIT, ds_limit);
+    CHECK_VMWRITE(GUEST_ES_AR_BYTES, ds_ar);
+
+    CHECK_VMWRITE(GUEST_SS_SELECTOR, ds_sel);
+    CHECK_VMWRITE(GUEST_SS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_SS_LIMIT, ds_limit);
+    CHECK_VMWRITE(GUEST_SS_AR_BYTES, ds_ar);
+
+    CHECK_VMWRITE(GUEST_FS_SELECTOR, ds_sel);
+    CHECK_VMWRITE(GUEST_FS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_FS_LIMIT, ds_limit);
+    CHECK_VMWRITE(GUEST_FS_AR_BYTES, ds_ar);
+
+    CHECK_VMWRITE(GUEST_GS_SELECTOR, ds_sel);
+    CHECK_VMWRITE(GUEST_GS_BASE, ds_base);
+    CHECK_VMWRITE(GUEST_GS_LIMIT, ds_limit);
+    CHECK_VMWRITE(GUEST_GS_AR_BYTES, ds_ar);
+
+    CHECK_VMWRITE(GUEST_LDTR_SELECTOR, 0);
+    CHECK_VMWRITE(GUEST_LDTR_BASE, 0);
+    CHECK_VMWRITE(GUEST_LDTR_LIMIT, 0);
+    CHECK_VMWRITE(GUEST_LDTR_AR_BYTES, 0x10000);
+
+    /* TR: a minimal 32-bit busy TSS. Required to exist (VMX entry checks),
+     * but the kernel will replace it almost immediately. */
+    CHECK_VMWRITE(GUEST_TR_SELECTOR, 0);
+    CHECK_VMWRITE(GUEST_TR_BASE, 0);
+    CHECK_VMWRITE(GUEST_TR_LIMIT, 0x67);
+    CHECK_VMWRITE(GUEST_TR_AR_BYTES, 0x008B);
+
+    /* ---- (8) GDTR / IDTR placeholders ---- */
+    CHECK_VMWRITE(GUEST_GDTR_BASE,  0);
+    CHECK_VMWRITE(GUEST_GDTR_LIMIT, 0xFFFF);
+    CHECK_VMWRITE(GUEST_IDTR_BASE,  0);
+    CHECK_VMWRITE(GUEST_IDTR_LIMIT, 0xFFFF);
+
+    /*RIP = startup_64 gpa*/ 
+    entry_rip = vcpu->vm->kernel_entry_gpa; 
+    if(!entry_rip)
+    {
+        pr_err("RELM: VCPU%d: longmode: vm->kernel_entry_gpa not set "
+               "(linux_loader_setup not run?)\n", vcpu->vpid);
+        return -EINVAL;
+    }
+    CHECK_VMWRITE(GUEST_RIP, entry_rip);
+
+    /*RSI = boot_params */ 
+    entry_rsi = vcpu->vm->boot_params_gpa;
+    if(!entry_rsi)
+    {
+        pr_err("RELM: VCPU%d: longmode: vm->boot_params_gpa not set\n",
+               vcpu->vpid);
+        return -EINVAL;
+    }
+
+    /*stack starts at the top of usabe RAM, below page table pages*/ 
+    CHECK_VMWRITE(GUEST_RSP, (vcpu->vm->total_guest_ram - (3 * PAGE_SIZE)) & ~0xFULL);
+    
+    /*only reserved bit set*/ 
+    CHECK_VMWRITE(GUEST_RFLAGS, 0x2ULL);
+
+    vcpu->regs.rip  = entry_rip;
+    vcpu->regs.rsi  = entry_rsi;
+    vcpu->regs.rsp  = (unsigned long)__vmread(GUEST_RSP);
+    vcpu->regs.rflags = 0x2;
+
+  /* Non-register guest state. */
+    CHECK_VMWRITE(GUEST_ACTIVITY_STATE, 0ULL);
+    CHECK_VMWRITE(GUEST_INTERRUPTIBILITY_INFO, 0ULL);
+    CHECK_VMWRITE(GUEST_PENDING_DBG_EXCEPTIONS, 0ULL);
+    CHECK_VMWRITE(VMCS_LINK_POINTER, 0xFFFFFFFFFFFFFFFFULL);
+
+    pr_info("RELM: VCPU%d: guest state = 64-bit long mode "
+            "(CR0=0x%llx CR4=0x%llx CR3=0x%llx EFER=0x%llx)\n",
+            vcpu->vpid, cr0, cr4, vcpu->cr3, efer);
+    pr_info("RELM: VCPU%d:   RIP=0x%llx (startup_64)  RSI=0x%llx (boot_params)\n",
+            vcpu->vpid, entry_rip, entry_rsi);
+
+    return 0;
+    
+}
+
 void relm_cr3_cache_init(struct cr3_shadow_cache *cache)
 {
     memset(cache, 0, sizeof(cache)); 
