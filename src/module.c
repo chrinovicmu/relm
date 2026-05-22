@@ -60,9 +60,6 @@ static int __init relm_module_init(void)
             my_vm->total_guest_ram / (1024 * 1024),
             my_vm->ept->eptp);
 
-
-    relm_fw_cfg_init(&my_vm->fw_data->fw_cfg); 
-
     ret = relm_iommu_init(my_vm, &relm_pdev->dev);
     if(ret)
     {
