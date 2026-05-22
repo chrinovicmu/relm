@@ -60,6 +60,7 @@ static int __init relm_module_init(void)
             my_vm->total_guest_ram / (1024 * 1024),
             my_vm->ept->eptp);
 
+
     ret = relm_iommu_init(my_vm, &relm_pdev->dev);
     if(ret)
     {
@@ -125,12 +126,7 @@ static int __init relm_module_init(void)
         goto _cleanup_vm;
     }
  
-    pr_info("RELM: ====================================================\n");
     pr_info("RELM: VM '%s' is running\n", my_vm->vm_name);
-    pr_info("RELM: Guest entry: 16-bit real mode at CS=0xF000 IP=0xFFF0\n");
-    pr_info("RELM:              (linear 0xFFFFFFF0 = SeaBIOS reset vector)\n");
-    pr_info("RELM: SeaBIOS will read fw_cfg, build e820, boot from disk\n");
-    pr_info("RELM: ====================================================\n");
  
     return 0;  
 

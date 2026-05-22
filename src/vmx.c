@@ -2321,7 +2321,7 @@ int relm_init_vmcs_state(struct vcpu *vcpu)
         return -1;
     }
  
-    if((ret = relm_setup_guest_state_firmware(vcpu)) != 0)
+    if((ret = relm_setup_guest_state_longmode(vcpu)) != 0)
     {
         pr_err("RELM: VCPU%d: firmware guest state setup failed: %d\n",
                vcpu->vpid, ret);
