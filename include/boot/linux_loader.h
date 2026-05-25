@@ -28,7 +28,6 @@ struct device;
 /* loadflags bit 0 — protected-mode kernel loaded high*/ 
 #define RELM_LOADFLAGS_LOADED_HIGH  (1U << 0) 
 
-
 #define RELM_BP_E820_MAX            128 
 #define RELM_BP_LOADER_TYPE         0xFFU 
 
@@ -106,11 +105,24 @@ struct relm_bp_e820_entry {
 #define RELM_INITRD_LOAD_GPA            0x04000000ULL  /* 64 MiB */
 #define RELM_INITRD_MAX_SIZE            (60ULL * 1024 * 1024)
 
+#define RELM_GUEST_GDT_GPA              0x00004000ULL 
+#define RELM_GUEST_GDT_SIZE             24U 
+
+#define RELM_GUEST_IDT_GPA              0x00005000ULL 
+#define RELM_GUEST_IDT_SIZE            (256U * 16U)
+
+#define RELM_GUEST_IDT_STUBS_GPA        0x00006000ULL 
+#define RELM_GUEST_IDT_STUBS_STRIDE     16U /*one stub per vector*/ 
+#define RELM_GUEST_IDT_STUBS_SIZE       (256U * RELM_GUEST_IDT_STUBS_STRIDE)
+
+#define RELM_GUEST_GDT_CS_SEL           0x0008U /*GDT[1]: 64 bit code*/ 
+#define RELM_GUEST_GDT_DS_SEL           0x0010U /*GDT[0]: 64 bit data*/ 
+
 #define RELM_KERNEL_FW_NAME             "relm/vmlinuz"
 #define RELM_INITRD_FW_NAME             "relm/initrd.img"
 
 
-/* Default cmdline if the caller passes NULL.
+/* Default cmdline 
  *   console=ttyS0,115200   : kernel log to serial (no VGA in RELM)
  *   earlyprintk=serial     : earliest possible serial output
  *   nokaslr                : easier to debug; KASLR moves symbols
@@ -138,6 +150,8 @@ int relm_boot_params_build(struct relm_vm *vm,
                            uint32_t initrd_size);
 
 uint64_t relm_linux_loader_entry_gpa(const struct relm_vm *vm);
+
+int relm_install_diag_idt_gdt(struct relm_vm *vm); 
 
 #endif 
 

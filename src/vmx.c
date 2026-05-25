@@ -22,6 +22,7 @@
 #include <include/vmexit.h>
 #include <include/apic.h>
 #include <include/vmcs_state.h>
+#include <include/boot/linux_loader.h> 
 #include <include/firmware/seabios.h>
 #include <utils/utils.h>
 
@@ -1851,18 +1852,15 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     CHECK_VMWRITE(GUEST_LDTR_LIMIT, 0);
     CHECK_VMWRITE(GUEST_LDTR_AR_BYTES, 0x10000);
 
-    /* TR: a minimal 32-bit busy TSS. Required to exist (VMX entry checks),
-     * but the kernel will replace it almost immediately. */
     CHECK_VMWRITE(GUEST_TR_SELECTOR, 0);
     CHECK_VMWRITE(GUEST_TR_BASE, 0);
     CHECK_VMWRITE(GUEST_TR_LIMIT, 0x67);
     CHECK_VMWRITE(GUEST_TR_AR_BYTES, 0x008B);
 
-    /* ---- (8) GDTR / IDTR placeholders ---- */
-    CHECK_VMWRITE(GUEST_GDTR_BASE,  0);
-    CHECK_VMWRITE(GUEST_GDTR_LIMIT, 0xFFFF);
-    CHECK_VMWRITE(GUEST_IDTR_BASE,  0);
-    CHECK_VMWRITE(GUEST_IDTR_LIMIT, 0xFFFF);
+    CHECK_VMWRITE(GUEST_GDTR_BASE,  RELM_GUEST_GDT_GPA);
+    CHECK_VMWRITE(GUEST_GDTR_LIMIT, RELM_GUEST_GDT_SIZE - 1U);
+    CHECK_VMWRITE(GUEST_IDTR_BASE,  RELM_GUEST_IDT_GPA);
+    CHECK_VMWRITE(GUEST_IDTR_LIMIT, RELM_GUEST_IDT_SIZE - 1U);
 
     /*RIP = startup_64 gpa*/ 
     entry_rip = vcpu->vm->kernel_entry_gpa; 

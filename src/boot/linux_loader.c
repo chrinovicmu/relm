@@ -426,4 +426,152 @@ uint64_t relm_linux_loader_entry_gpa(const struct relm_vm *vm)
     return vm ? vm->kernel_entry_gpa : 0;
 }
 
+static int relm_write_gdt_entry(struct relm_vm *vm, 
+                                unsigned int index, 
+                                uint64_t entry)
+{
+    uint64_t gpa = RELM_GUEST_GDT_GPA + index * 8U; 
+    int n = relm_vm_copy_to_guest(vm, gpa, &entry, sizeof(entry)); 
+    return (n == sizeof(entry)) ? 0 : (n < 0 ? n : -EIO); 
+}
 
+static int relm_write_idt_gate(struct relm_vm *vm,
+                               unsigned int vec,
+                               uint64_t handler_gpa)
+{
+    uint8_t gate[16];
+
+    gate[0]  = (uint8_t)( handler_gpa        & 0xFFU);
+    gate[1]  = (uint8_t)((handler_gpa >>  8) & 0xFFU);
+
+    gate[2]  = (uint8_t)( RELM_GUEST_GDT_CS_SEL        & 0xFFU);
+    gate[3]  = (uint8_t)((RELM_GUEST_GDT_CS_SEL >> 8 ) & 0xFFU);
+
+    gate[4]  = 0x00;
+
+    gate[5]  = 0x8E;
+
+    gate[6]  = (uint8_t)((handler_gpa >> 16) & 0xFFU);
+    gate[7]  = (uint8_t)((handler_gpa >> 24) & 0xFFU);
+
+    gate[8]  = (uint8_t)((handler_gpa >> 32) & 0xFFU);
+    gate[9]  = (uint8_t)((handler_gpa >> 40) & 0xFFU);
+    gate[10] = (uint8_t)((handler_gpa >> 48) & 0xFFU);
+    gate[11] = (uint8_t)((handler_gpa >> 56) & 0xFFU);
+
+    gate[12] = 0x00;
+    gate[13] = 0x00;
+    gate[14] = 0x00;
+    gate[15] = 0x00;
+
+    {
+        uint64_t gpa = RELM_GUEST_IDT_GPA + vec * 16U;
+        int n = relm_vm_copy_to_guest(vm, gpa, gate, sizeof(gate));
+        return (n == sizeof(gate)) ? 0 : (n < 0 ? n : -EIO);
+    }
+}
+
+extern uint8_t relm_idt_stub_template[];
+extern uint8_t relm_idt_stub_template_end[];
+
+static int relm_write_idt_stub(struct relm_vm *vm, unsigned int vec)
+{
+    uint8_t stub[RELM_GUEST_IDT_STUBS_STRIDE]; 
+    
+    memcpy(stub, relm_idt_stub_template, RELM_GUEST_IDT_STUBS_STRIDE); 
+
+    /*the immediate value of MOV isntruction in the stub*/ 
+    stub[1] = (uint8_t)(vec & 0xFFU); 
+    {
+        uint64_t gpa = RELM_GUEST_IDT_STUBS_GPA + vec * RELM_GUEST_IDT_STUBS_STRIDE;
+        int n = relm_vm_copy_to_guest(vm, gpa, stub, sizeof(stub));
+        return (n == sizeof(stub)) ? 0 : (n < 0 ? n : -EIO);
+    }
+}
+
+int relm_install_daig_idt_gdt(struct relm_vm *vm)
+{
+    int ret; 
+    unsigned int v; 
+
+    if(!vm)
+        return -EINVAL; 
+
+
+    ret = relm_vm_zero_guest_memory(vm, RELM_GUEST_GDT_GPA, 0x1000U);
+    if(ret < 0)
+    {
+        pr_err("RELM: linux_loader: zero GDT page failed: %d\n", ret);
+        return ret;
+    }
+    ret = relm_vm_zero_guest_memory(vm, RELM_GUEST_IDT_GPA, RELM_GUEST_IDT_SIZE);
+    if(ret < 0)
+    {
+        pr_err("RELM: linux_loader: zero IDT page failed: %d\n", ret);
+        return ret;
+    }
+    ret = relm_vm_zero_guest_memory(vm, RELM_GUEST_IDT_STUBS_GPA,
+                                    RELM_GUEST_IDT_STUBS_SIZE);
+    if(ret < 0)
+    {
+        pr_err("RELM: linux_loader: zero IDT stubs failed: %d\n", ret);
+        return ret;
+    }
+
+    
+    ret = relm_write_gdt_entry(vm, 0, 0x0000000000000000ULL);
+    if(ret) 
+        goto _err_log;
+
+    ret = relm_write_gdt_entry(vm, 1, 0x00AF9B000000FFFFULL); /* 64-bit code */
+    if(ret)
+        goto _err_log;
+
+    ret = relm_write_gdt_entry(vm, 2, 0x00CF93000000FFFFULL); /* 64-bit data */
+    if(ret) 
+        goto _err_log;
+
+     /* done in two passes (stubs first, then gates) so that a partially
+     * initialised IDT can never reference an as-yet-unwritten stub. In
+     * practice the guest isn't running yet, so the ordering is purely
+     * defensive — it would matter only if some other code on the host
+     * concurrently triggered a guest run, which we don't allow.*/
+
+    for(v = 0; v < 256U; v++)
+    {
+        ret = relm_write_idt_stub(vm, v);
+        if(ret)
+        {
+            pr_err("RELM: linux_loader: write IDT stub %u failed: %d\n",
+                   v, ret);
+            return ret;
+        }
+    }
+
+    for(v = 0; v < 256U; v++)
+    {
+        uint64_t handler_gpa = RELM_GUEST_IDT_STUBS_GPA +
+                               v * RELM_GUEST_IDT_STUBS_STRIDE;
+
+        ret = relm_write_idt_gate(vm, v, handler_gpa);
+        if(ret)
+        {
+            pr_err("RELM: linux_loader: write IDT gate %u failed: %d\n",
+                   v, ret);
+            return ret;
+        }
+    }
+
+    pr_info("RELM: linux_loader: diag GDT @ GPA 0x%llx (%u bytes), "
+            "IDT @ GPA 0x%llx (%u bytes), stubs @ GPA 0x%llx (%u bytes)\n",
+            (unsigned long long)RELM_GUEST_GDT_GPA, RELM_GUEST_GDT_SIZE,
+            (unsigned long long)RELM_GUEST_IDT_GPA, RELM_GUEST_IDT_SIZE,
+            (unsigned long long)RELM_GUEST_IDT_STUBS_GPA,
+            RELM_GUEST_IDT_STUBS_SIZE);
+
+    return 0;
+
+_err_log:
+    pr_err("RELM: linux_loader: GDT entry write failed: %d\n", ret);
+    return ret;
+}

@@ -89,7 +89,7 @@ relm_vmentry_asm:
 
     movq    GREGS_RDI(%r12), %rdi
     movq    GREGS_R13(%r12), %r13
-    movq    GREGS_R12(%r12), %rdi 
+    movq    GREGS_R12(%r12), %r12 
 
     jnz     do_resume
 

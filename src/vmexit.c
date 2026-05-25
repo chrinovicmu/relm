@@ -8,6 +8,7 @@
 #include <include/vmexit.h>
 #include <include/vmcs_state.h>
 #include <include/firmware/fw_cfg.h> 
+#include <include/boot/linux_loader.h> 
 #include <utils/utils.h>
 
 #define CREATE_TRACE_POINTS 
@@ -287,12 +288,81 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             pr_info("relm: [VPID=%u] VMCALL hypercall at RIP=0x%llx\n",
                     vcpu->vpid, guest_rip);
 
-            /*TODO: implement hypercall
-            * advance RIP for now*/
+
+            /*diagnostic IDT trampoline 
+             * to distinguish a real hypercall from a diagnostic trap, 
+             * we additionally check that guest_rip lands inside the 
+             * stubs page and that rax is less that 256*/ 
+
+            uint64_t rax = vcpu->regs.rax; 
+            uint64_t stubs_lo = RELM_GUEST_IDT_STUBS_GPA; 
+            uint64_t stubs_hi = stubs_lo + RELM_GUEST_IDT_STUBS_SIZE; 
+
+            bool from_diag_stub = (guest_rip >= stubs_lo) && 
+                (guest_rip < stubs_hi) && 
+                (rax < 256ULL); 
+            
+            if(from_diag_stub)
+            {
+                uint64_t cr2 = _read_cr2(); 
+                uint64_t exit_qual = exit_qualification; 
+
+                uint64_t stub_base = guest_rip - 8ULL; 
+                uint64_t expected_stub = stubs_lo + rax *
+                    RELM_GUEST_IDT_STUBS_STRIDE; 
+
+                const char *vec_name = "unknown"; 
+                switch(rax)
+                {
+                    case 0:  vec_name = "#DE (divide error)";          break;
+                    case 1:  vec_name = "#DB (debug)";                 break;
+                    case 2:  vec_name = "NMI";                         break;
+                    case 3:  vec_name = "#BP (breakpoint)";            break;
+                    case 4:  vec_name = "#OF (overflow)";              break;
+                    case 5:  vec_name = "#BR (bound range)";           break;
+                    case 6:  vec_name = "#UD (invalid opcode)";        break;
+                    case 7:  vec_name = "#NM (no FPU)";                break;
+                    case 8:  vec_name = "#DF (double fault)";          break;
+                    case 10: vec_name = "#TS (invalid TSS)";           break;
+                    case 11: vec_name = "#NP (segment not present)";   break;
+                    case 12: vec_name = "#SS (stack-segment fault)";   break;
+                    case 13: vec_name = "#GP (general protection)";    break;
+                    case 14: vec_name = "#PF (page fault)";            break;
+                    case 16: vec_name = "#MF (x87 FPE)";               break;
+                    case 17: vec_name = "#AC (alignment check)";       break;
+                    case 18: vec_name = "#MC (machine check)";         break;
+                    case 19: vec_name = "#XM (SIMD FPE)";              break;
+                    case 21: vec_name = "#CP (control protection)";    break;
+                    default: break;
+                }
+
+                pr_err("RELM: [VPID=%u] *** DIAG-IDT TRAP vector=%llu (%s)\n",
+                       vcpu->vpid, rax, vec_name);
+                pr_err("RELM:        RIP-at-vmcall=0x%llx  (stub_base=0x%llx, "
+                       "expected=0x%llx%s)\n",
+                       guest_rip - 3ULL, stub_base, expected_stub,
+                       (stub_base == expected_stub) ? "" :
+                                                      " — MISMATCH!");
+                pr_err("RELM:        CR2=0x%llx  (meaningful only for #PF)\n",
+                       cr2);
+                pr_err("RELM:        EXIT_QUAL=0x%llx  RSP=0x%llx  RFLAGS=0x%llx\n",
+                       exit_qual,
+                       (uint64_t)__vmread(GUEST_RSP),
+                       (uint64_t)__vmread(GUEST_RFLAGS)); 
+
+                /*stop guest */ 
+               ret = 0; 
+                break; 
+            }
+            /*TODO : 
+             * Non-diagnostic VMCALL: real hypercall path. */
+            pr_info("relm: [VPID=%u] VMCALL hypercall at RIP=0x%llx RAX=0x%llx\n",
+                    vcpu->vpid, guest_rip, rax);
+
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
             ret = 1;
-            break; 
+            break;
 
         case EXIT_REASON_MSR_READ:
         {

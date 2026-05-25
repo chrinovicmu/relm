@@ -29,6 +29,7 @@ $(MODULE_NAME)-y := \
 	src/firmware/fw_cfg.o \
 	src/firmware/seabios.o \
 	src/boot/linux_loader.o \
+	src/boot/stub.o \
     guest/guest_kernel_embed.o
 
 .PHONY: all modules clean
