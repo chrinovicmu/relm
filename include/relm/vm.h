@@ -76,21 +76,27 @@ struct relm_vm
     spinlock_t lock; 
 }; 
 
-struct relm_vm_operations{
+struct relm_vm_operations 
+{
+    int (*vm_init)(struct relm_vm *vm);
 
-    int (*vm_init)(struct relm_vm *vm); 
-    void (*vm_destroy)(struct relm_vm *vm); 
+    void (*vm_destroy)(struct relm_vm *vm);
 
-    int (*map_memory)(struct relm_vm *vm, uint64_t gpa, 
-                      uint64_t hpa, uint64_t size, uint64_t flags); 
+    /*create, arch-initilizer, and register one vCPU*/ 
+    int (*add_vcpu)(struct relm_vm *vm, int vpid); 
 
-    int (*create_guest_page_tables)(struct relm_vm *vm); 
+    /* Nanoseconds since VM start. */
+    uint64_t (*get_uptime)(struct relm_vm *vm);
 
-    uint64_t (*get_uptime)(struct relm_vm *vm); 
+    /* Aggregate vCPU utilisation, 0–100. */
     uint64_t (*get_cpu_utilization)(struct relm_vm *vm);
-    void (*dump_regs)(struct relm_vm *vm, int vcpu_id); 
-    void (*print_stats)(struct relm_vm *vm); 
-}; 
+
+    /* Dump guest registers for a specific vCPU to the kernel log. */
+    void (*dump_regs)(struct relm_vm *vm, int vcpu_id);
+
+    /* Print exit statistics to the kernel log. */
+    void (*print_stats)(struct relm_vm *vm);
+};
 
 struct relm_mem_ops
 {

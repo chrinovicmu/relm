@@ -17,6 +17,8 @@ struct relm_vm_arch
 }; 
 
 extern const struct relm_vm_operations vmx_vm_ops; 
+#define RELM_ARCH_VM_OPS vmx_vm_ops
+
 extern const struct relm_mem_ops vmx_mem_ops; 
 #define RELM_ARCH_MEM_OPS vmx_mem_ops
 

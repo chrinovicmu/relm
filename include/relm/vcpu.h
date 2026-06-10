@@ -53,33 +53,50 @@ struct vcpu
     struct vcpu_arch arch ; 
 };
 
-struct vcpu_arch_ops
-{
-    /*initialize arch-specific vcpu state*/ 
-    int (*vcpu_init)(struct vcpu *vcpu); 
+struct vcpu_arch_ops {
 
-    /*tear down and free everything allocated by vcpu_init*/ 
-    void (*vcpu_destroy)(struct vcpu *vcpu); 
+    /*
+     * vcpu_alloc — arch-specific Phase 1 initialisation.
+     *
+     * struct vcpu is allocated and its identity fields are set.
+     * The arch uses this to allocate everything it needs:
+     *   VMX:  VMCS region, IO bitmap, MSR bitmap, MSR areas,
+     *         exec controls, APIC pages, host_rsp.
+     *   SVM:  VMCB, MSRPM, IOPM.
+     *   ARM:  VGIC config, sysreg shadow allocation.
+     *
+     * Returns 0 on success, negative errno on failure.
+     * On failure the generic layer frees host_stack and the vcpu struct.
+     */
+    int  (*vcpu_alloc)(struct vcpu *vcpu);
 
-    /*enter guest, return on vm-exit. the arch layer is
-    * responsible for saving and restoring guest_regs and populating*/ 
-    int (*vcpu_run)(struct vcpu *vcpu); 
+    /*
+     * vcpu_init — arch Phase 2, runs ON the pinned host CPU.
+     *
+     * On VMX: VMCLEAR, VMPTRLD, write all VMCS host+guest fields.
+     * Must be called from the vCPU kthread after CPU pinning.
+     * Phase 1 (vcpu_alloc) can run on any CPU; Phase 2 cannot.
+     */
+    int  (*vcpu_init)(struct vcpu *vcpu);
 
-    /*generic exit dispather after decoding exit reason 
-     * exit reason from vcpu->arch, lets arch layer handle it's own exits*/
-    int (*handle_exit)(struct vcpu *vcpu); 
+    /* Enter the guest. Returns on every exit. */
+    int  (*vcpu_run)(struct vcpu *vcpu);
 
-    /*sets up memory virtualization layer */ 
-    int (*setup_mmu)(struct vcpu *vcpu); 
+    /* Handle an exit. Returns 1 = handled, 0 = pass to generic. */
+    int  (*handle_exit)(struct vcpu *vcpu);
 
-    /*insert virtual interrupt into guest*/ 
-    int (*inject_irq)(struct vcpu, unsigned int vector); 
+    /* Free everything allocated by vcpu_alloc. */
+    void (*vcpu_free)(struct vcpu *vcpu);
 
-    /*dump arch registers to kernel log for debugging*/ 
-    int (*dump_regs)(struct *vcpu); 
+    /* Free CPU-bound state allocated by vcpu_init (e.g. VMCLEAR). */
+    void (*vcpu_destroy)(struct vcpu *vcpu);
 
-}; 
-
+    int  (*setup_mmu)(struct vcpu *vcpu);
+    int  (*inject_irq)(struct vcpu *vcpu, unsigned int vector);
+    int  (*read_msr)(struct vcpu *vcpu, uint32_t msr, uint64_t *val);
+    int  (*write_msr)(struct vcpu *vcpu, uint32_t msr, uint64_t val);
+    void (*dump_regs)(struct vcpu *vcpu);
+};
 struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vcpu_id);
 void relm_vcpu_destroy(struct vcpu *vcpu);
 int relm_vcpu_run(struct vcpu *vcpu);

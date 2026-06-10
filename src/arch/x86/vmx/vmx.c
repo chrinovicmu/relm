@@ -32,38 +32,77 @@ struct host_cpu *relm_get_per_cpu_hcpu(void)
     return this_cpu_read(relm_per_cpu_hcpu); 
 }
 
+/* host CPU setup */
 static int relm_vmxon(struct host_cpu *hcpu);
 static int relm_vmxoff(struct host_cpu *hcpu);
 static int relm_setup_vmxon_region(struct host_cpu *hcpu);
-static int relm_setup_vmcs_region(struct vcpu *vcpu);
-static int relm_setup_io_bitmap(struct vcpu *vcpu);
-static int relm_setup_msr_bitmap(struct vcpu *vcpu);
-static int relm_setup_msr_areas(struct vcpu *vcpu,
-                               const uint32_t *vmexit_list,  size_t vmexit_count,
-                               const uint32_t *vmentry_list, const uint64_t *vmentry_values,
-                               size_t vmentry_count);
-
-static int relm_vcpu_setup_msr_state(struct vcpu *vcpu);
-static int relm_setup_exec_controls(struct vcpu *vcpu);
-static int vmx_apply_exec_controls(struct vcpu *vcpu);
-static void vmx_init_exec_controls(struct vcpu *vcpu);
-
-static void relm_free_io_bitmap(struct vcpu *vcpu);
-static void relm_free_msr_bitmap(struct vcpu *vcpu);
-static void relm_free_vmcs_region(struct vcpu *vcpu);
-static void relm_free_all_msr_areas(struct vcpu *vcpu);
 static void relm_free_vmxon_region(struct host_cpu *hcpu);
 
+/* VMCS region  */
+static int relm_setup_vmcs_region(struct vcpu *vcpu);
+static void relm_free_vmcs_region(struct vcpu *vcpu);
+
+/*  bitmaps  */
+static int relm_setup_io_bitmap(struct vcpu *vcpu);
+static int relm_setup_msr_bitmap(struct vcpu *vcpu);
+static void relm_free_io_bitmap(struct vcpu *vcpu);
+static void relm_free_msr_bitmap(struct vcpu *vcpu);
+
+/*  MSR areas */
+static int relm_setup_msr_areas(struct vcpu *vcpu,
+                                const uint32_t *vmexit_list,
+                                size_t vmexit_count,
+                                const uint32_t *vmentry_list,
+                                const uint64_t *vmentry_values,
+                                size_t vmentry_count);
+static int relm_vcpu_setup_msr_state(struct vcpu *vcpu);
+static void relm_free_all_msr_areas(struct vcpu *vcpu);
 static struct msr_entry *alloc_msr_entry(size_t n_entries);
 static void free_msr_area(struct msr_entry *area, size_t n_entries);
 static void populate_msr_load_area(struct msr_entry *area, size_t count,
-                                   const uint32_t *indices, const uint64_t *values);
-static void populate_msr_store_area(struct msr_entry *area, size_t count, 
+                                   const uint32_t *indices,
+                                   const uint64_t *values);
+static void populate_msr_store_area(struct msr_entry *area, size_t count,
                                     const uint32_t *indices);
 
+/* exec controls */
+static void relm_init_exec_controls(struct vcpu *vcpu);
+static int relm_apply_exec_controls(struct vcpu *vcpu);
+
+/* exception bitmap */
+static int relm_update_exception_bitmap(struct vcpu *vcpu);
+
+/* CR controls */
+static int relm_setup_cr_controls(struct vcpu *vcpu);
+static int relm_setup_host_state(struct vcpu *vcpu);
+static int relm_setup_guest_state_longmode(struct vcpu *vcpu);
+static int relm_setup_guest_state_firmware(struct vcpu *vcpu);
+
+/* bitmap enable checks */
 static inline bool relm_vcpu_io_bitmap_enabled(struct vcpu *vcpu);
 static inline bool relm_vcpu_msr_bitmap_enabled(struct vcpu *vcpu);
+static inline bool relm_vcpu_ept_enabled(struct vcpu *vcpu);
 static inline unsigned int msr_area_order(size_t bytes);
+
+/* --- CR3 cache --- */
+static void relm_cr3_cache_apply(struct cr3_shadow_cache *cache);
+
+/* arch ops implementations */
+static int  vmx_vcpu_alloc(struct vcpu *vcpu);
+static int  vmx_vcpu_init(struct vcpu *vcpu);
+static int  vmx_vcpu_run(struct vcpu *vcpu);
+static void vmx_vcpu_free(struct vcpu *vcpu);
+static void vmx_vcpu_destroy(struct vcpu *vcpu);
+static void vmx_dump_regs(struct vcpu *vcpu);
+static int  vmx_add_vcpu(struct relm_vm *vm, int vpid);
+static int  vmx_vm_init(struct relm_vm *vm);
+static void vmx_vm_destroy(struct relm_vm *vm);
+
+static int relm_setup_guest_state(struct vcpu *vcpu);
+static int relm_setup_guest_state_firmware(struct vcpu *vcpu); 
+static int relm_setup_guest_state_longmode(struct vcpu *vcpu); 
+
+extern int vmx_handle_exit(struct vcpu *vcpu);
 
 const uint32_t relm_vmexit_msr_indices[] = {
     MSR_IA32_EFER,
@@ -93,6 +132,27 @@ const uint32_t relm_vmentry_msr_indices[] = {
 
 uint64_t relm_vmentry_msr_values[RELM_VMENTRY_MSR_COUNT]; 
 
+
+const struct vcpu_arch_ops vmx_vcpu_ops = {
+    .vcpu_alloc   = vmx_vcpu_alloc,
+    .vcpu_init    = vmx_vcpu_init,
+    .vcpu_run     = vmx_vcpu_run,
+    .handle_exit  = vmx_handle_exit,    /* defined in vmexit.c */
+    .vcpu_free    = vmx_vcpu_free,
+    .vcpu_destroy = vmx_vcpu_destroy,
+    .setup_mmu    = vmx_setup_mmu,
+    .inject_irq   = vmx_inject_irq,
+    .read_msr     = vmx_read_msr,
+    .write_msr    = vmx_write_msr,
+    .dump_regs    = vmx_dump_regs,
+};
+
+const struct relm_vm_operations vmx_vm_ops = {
+    .vm_init    = vmx_vm_init,
+    .vm_destroy = vmx_vm_destroy,
+    .add_vcpu   = vmx_add_vcpu,
+    /* introspection slots NULL — filled by relm_vm_ops_merge in vm.c */
+};
 
 inline bool relm_vmx_support(void) 
 {
@@ -735,9 +795,6 @@ static int relm_setup_io_bitmap(struct vcpu *vcpu)
 
     vcpu->arch.io_bitmap_pa = virt_to_phys(vcpu->arch.io_bitmap); 
     
-    PDEBUG("Allocated and cleared I/O bitmap at VA %p PA 0x%llx\n", 
-            vcpu->arch.io_bitmap, (unsigned long long )vcpu->arch.io_bitmap_pa);
-
     /*write the address to the VMCS */ 
     if(_vmwrite(VMCS_IO_BITMAP_A, vcpu->arch.io_bitmap_pa) != 0)
     {
@@ -1155,302 +1212,309 @@ int relm_setup_exec_controls(struct vcpu *vcpu)
 
 }
 
-struct vcpu *relm_vcpu_alloc_init(struct relm_vm *vm, int vpid)
+static int vmx_add_vcpu(struct relm_vm *vm, int vpid)
 {
-    if(!vm)
-        return ERR_PTR(-EINVAL); 
-
     struct vcpu *vcpu;
-    int ret; 
+    int index = VPID_TO_INDEX(vpid);
 
-    PDEBUG("RELM: Allocating zeroed VCPU struct\n");
-    /* Allocate zeroed VCPU struct */
-    vcpu = kzalloc(sizeof(*vcpu), GFP_KERNEL);
-    if (!vcpu) {
-        PDEBUG("RELM: Failed to allocate VCPU struct\n");
-        return ERR_PTR(-ENOMEM);
-    }
-    PDEBUG("RELM: VCPU struct allocated at %p\n", vcpu);
-
-    vcpu->vm = vm;
-    vcpu->vpid = vpid;
-    vcpu->state = VCPU_STATE_UNINITIALIZED; 
-    
-    if(relm_apic_alloc(&vcpu->arch.apic) != 0)
-    {
-        pr_err("RELM: VCPU%d: failed to allocate APIC pages\n", vpid);
-        kfree(vcpu);
-        return NULL;
-    }
-
-    vcpu->halted = false; 
-    vcpu->arch.launched = 0; 
-
-    /*default architectural state */ 
-    vcpu->arch.regs.rflags = 0x2; 
-    vcpu->arch.regs.rip = 0x0; 
-
-    /*cr3 points to guest page tables */
-    vcpu->arch.cr3 = vm->pml4_gpa;
-
-    spin_lock_init(&vcpu->lock);
-    init_waitqueue_head(&vcpu->wq); 
-
-
-    PDEBUG("RELM: Allocating vCPU host stack\n");
-    /*alllocate vCPU stack */ 
-    vcpu->host_stack = (void *)__get_free_pages(
-        GFP_KERNEL | __GFP_ZERO, 
-        HOST_STACK_ORDER
-    ); 
-    if(!vcpu->host_stack) {
-        pr_err("RELM: Failed to allocate host stack for VCPU%d\n", vpid);
-        goto _out_free_vcpu;
-    }
-    PDEBUG("RELM: Host stack allocated at %p\n", vcpu->host_stack);
-
-    /*point to top of host stack 
-     * point to near top of the stack 
-     * leave 0x100 bytes for red zone , then 16-byte align*/ 
-    vcpu->arch.host_rsp = ((uint64_t)vcpu->host_stack + HOST_STACK_SIZE - 0x100)
-                    & ~0xFULL; 
-     
-    PDEBUG("RELM: Host RSP set to 0x%llx\n", vcpu->arch.host_rsp);
-
-    PDEBUG("RELM: Setting up VMCS region\n");
-    /* Allocate and setup VMCS region */
-    if (relm_setup_vmcs_region(vcpu) != 0)
-    {
-        pr_err("RELM: Failed to setup VMCS region\n");
-        goto _out_free_host_stack; 
-    }
-    PDEBUG("RELM: VMCS region setup complete\n");
-
-    relm_init_exec_controls(vcpu); 
-
-    PDEBUG("RELM: Setting up IO bitmap\n");
-
-    if(relm_vcpu_io_bitmap_enabled(vcpu))
-    {
-        if (relm_setup_io_bitmap(vcpu) != 0)
-        {
-            pr_err("Failed to setup I/O bitmap\n");
-            goto _out_free_msr_areas; 
-        }
-    }
-
-    PDEBUG("RELM: Setting exception bitmap\n");
-    /* we catch #UD (6) to prevent guest crashes on unsupported instructions.
-     * we catch #PF (14) if we are using Shadow Paging or debugging memory.
+    /*
+     * relm_vcpu_create handles: kzalloc of struct vcpu, identity fields
+     * (vm, vpid, state, ops), lock/wq init, host_stack allocation, then
+     * calls vcpu->ops->vcpu_alloc (our vmx_vcpu_alloc above).
      */
-    vcpu->arch.exception_bitmap = (1U << 6) | (1U << 14); 
+    vcpu = relm_vcpu_create(vm, vpid, &vmx_vcpu_ops);
+    if (IS_ERR(vcpu)) {
+        pr_err("RELM: VMX: relm_vcpu_create failed for VPID%d: %ld\n",
+               vpid, PTR_ERR(vcpu));
+        return PTR_ERR(vcpu);
+    }
 
-    PDEBUG("RELM: Setting up MSR bitmap\n");
-    /* Setup MSR bitmap */
-    if(relm_vcpu_msr_bitmap_enabled(vcpu))
-    {
-        if (relm_setup_msr_bitmap(vcpu) != 0) 
-        {
-            pr_err("Failed to setup MSR bitmap\n");
-            goto _out_free_io_bitmap; 
+    vcpu->target_cpu_id = HOST_CPU_ID;
+
+    vm->vcpus[index] = vcpu;
+    vm->online_vcpus++;
+
+    pr_info("RELM: VMX: VCPU%d added to VM%d (target CPU%d)\n",
+            vpid, vm->vm_id, vcpu->target_cpu_id);
+
+    return 0;
+}
+
+/*vmx specific allocations */  
+static int vmx_vcpu_alloc(struct vcpu *vcpu)
+{
+    if (relm_apic_alloc(&vcpu->arch.apic) != 0) {
+        pr_err("RELM: VCPU%d: APIC alloc failed\n", vcpu->vpid);
+        return -ENOMEM;
+    }
+
+    vcpu->arch.launched    = 0;
+    vcpu->arch.regs.rflags = 0x2;   /* architecturally reserved bit 1 */
+    vcpu->arch.regs.rip    = 0x0;
+
+    vcpu->arch.cr3 = vcpu->vm->arch.pml4_gpa;
+   
+    /*16 byte-aligned and leave 100 bytes for red zone*/  
+    vcpu->arch.host_rsp = ((uint64_t)vcpu->host_stack
+                           + HOST_STACK_SIZE - 0x100) & ~0xFULL;
+
+    PDEBUG("RELM: VCPU%d: host_rsp=0x%llx\n",
+           vcpu->vpid, vcpu->arch.host_rsp);
+
+    if (relm_setup_vmcs_region(vcpu) != 0) {
+        pr_err("RELM: VCPU%d: VMCS region alloc failed\n", vcpu->vpid);
+        goto _out_free_apic;
+    }
+    relm_init_exec_controls(vcpu);
+
+    if (relm_vcpu_io_bitmap_enabled(vcpu)) {
+        if (relm_setup_io_bitmap(vcpu) != 0) {
+            pr_err("RELM: VCPU%d: IO bitmap alloc failed\n", vcpu->vpid);
+            goto _out_free_vmcs;
         }
     }
 
-    PDEBUG("RELM: VCPU%d: allocating MSR areas\n", vpid);
+    /* Exception bitmap: intercept #UD(6) and #PF(14).
+     * Written to VMCS in Phase 2 (vmx_vcpu_init). */
+    vcpu->arch.exception_bitmap = (1U << 6) | (1U << 14);
 
-    if(relm_vcpu_setup_msr_state(vcpu) != 0)
-    {
-        pr_err("Failed to setup MSR areas\n"); 
-        goto _out_free_msr_bitmap; 
+    if (relm_vcpu_msr_bitmap_enabled(vcpu)) {
+        if (relm_setup_msr_bitmap(vcpu) != 0) {
+            pr_err("RELM: VCPU%d: MSR bitmap alloc failed\n", vcpu->vpid);
+            goto _out_free_io_bitmap;
+        }
     }
 
-    relm_apic_init(&vcpu->arch.apic, (uint8_t)VPID_TO_INDEX(vpid)); 
-    
-    vcpu->state = VCPU_STATE_INITIALIZED; 
+    /* MSR load/store areas for VM-entry and VM-exit. */
+    if (relm_vcpu_setup_msr_state(vcpu) != 0) {
+        pr_err("RELM: VCPU%d: MSR state setup failed\n", vcpu->vpid);
+        goto _out_free_msr_bitmap;
+    }
 
-    pr_info("RELM: VCPU%d: Phase 1 complete - all memory allocated"
-            " (stack=%p rsp=0x%llx vmcs_pa=0x%llx)\n",
-            vpid, vcpu->host_stack, vcpu->arch.host_rsp, vcpu->arch.vmcs_pa);
+    /* Initialise virtual APIC state (APIC ID, version register etc.). */
+    relm_apic_init(&vcpu->arch.apic, (uint8_t)VPID_TO_INDEX(vcpu->vpid));
 
-    return vcpu; 
+    pr_info("RELM: VCPU%d: VMX Phase 1 complete "
+            "(stack=%p host_rsp=0x%llx vmcs_pa=0x%llx)\n",
+            vcpu->vpid, vcpu->host_stack,
+            vcpu->arch.host_rsp, vcpu->arch.vmcs_pa);
+    return 0;
 
 _out_free_msr_bitmap:
     relm_free_msr_bitmap(vcpu);
-
 _out_free_io_bitmap:
     relm_free_io_bitmap(vcpu);
-
-_out_free_msr_areas:
-    relm_free_all_msr_areas(vcpu);
-
 _out_free_vmcs:
     relm_free_vmcs_region(vcpu);
-
-_out_free_host_stack:
-    if(vcpu->host_stack)
-        free_pages((unsigned long)vcpu->host_stack, HOST_STACK_ORDER);
-
-_out_free_vcpu:
-    if(vcpu)
-        kfree(vcpu);
-    
-    return NULL; 
+_out_free_apic:
+    relm_apic_free(&vcpu->arch.apic);
+    return -ENOMEM;
 }
 
-int relm_vcpu_vmcs_setup(struct vcpu *vcpu)
+/*
+ * vmx_vcpu_init — VMX implementation of vcpu_arch_ops->vcpu_init.
+ *
+ * Phase 2: runs inside relm_vcpu_loop() AFTER CPU pinning.
+ * Executes VMCLEAR and VMPTRLD to make the VMCS current on this CPU,
+ * then writes all VMCS host and guest state fields.
+ *
+ * Must run on the same physical CPU the vCPU will execute on.
+ * All of these VMX instructions operate on the CPU's current-VMCS pointer.
+ */
+static int vmx_vcpu_init(struct vcpu *vcpu)
 {
-    int ret; 
+    int ret;
 
-    if(!vcpu)
-    {
-        pr_err("RELM: relm_vcpu_vmcs_setup valiied with NULL vcpu\n"); 
-        return -EINVAL; 
-    }
-    pr_info("RELM: VCPU%d: Phase 2 - VMCS setup starting on CPU%d\n",
+    pr_info("RELM: VCPU%d: VMX Phase 2 on CPU%d\n",
             vcpu->vpid, smp_processor_id());
 
-    PDEBUG("RELM: VCPU%d: executing VMCLEAR on CPU%d\n",
-           vcpu->vpid, smp_processor_id());
-    
     ret = relm_vmclear(vcpu);
-    if(ret != 0)
-    {
-        pr_err("RELM: VCPU%d: VMCLEAR failed on CPU%d: %d\n",
-               vcpu->vpid, smp_processor_id(), ret);
+    if (ret != 0) {
+        pr_err("RELM: VCPU%d: VMCLEAR failed: %d\n", vcpu->vpid, ret);
         return ret;
     }
-
-    PDEBUG("RELM: VCPU%d: executing VMPTRLD on CPU%d\n",
-           vcpu->vpid, smp_processor_id());
 
     ret = relm_vmptrld(vcpu);
-    if(ret != 0)
-    {
-        pr_err("RELM: VCPU%d: VMPTRLD failed on CPU%d: %d\n",
-               vcpu->vpid, smp_processor_id(), ret);
+    if (ret != 0) {
+        pr_err("RELM: VCPU%d: VMPTRLD failed: %d\n", vcpu->vpid, ret);
         return ret;
     }
 
-    if(vcpu->vm->ept)
-    {
-        PDEBUG("RELM: VCPU%d: writing EPT_POINTER=0x%llx\n",
-               vcpu->vpid, vcpu->vm->ept->eptp);
-        CHECK_VMWRITE(EPT_POINTER, vcpu->vm->ept->eptp);
-    }
-    else
-    {
-        pr_err("RELM: VCPU%d: no EPT context - cannot proceed\n", vcpu->vpid);
+    if (!vcpu->vm->arch.ept) {
+        pr_err("RELM: VCPU%d: no EPT context\n", vcpu->vpid);
         return -EINVAL;
     }
+    CHECK_VMWRITE(EPT_POINTER, vcpu->vm->arch.ept->eptp);
 
-    PDEBUG("RELM: VCPU%d: applying execution controls\n", vcpu->vpid);
-
-    if(relm_apply_exec_controls(vcpu) != 0)
-    {
-        pr_err("RELM: VCPU%d: exec control VMCS write failed\n", vcpu->vpid);
+    /* Write execution controls into VMCS. relm_apply_exec_controls reads
+     * the allowed-bits MSRs and sanitises the bitmasks before writing. */
+    if (relm_apply_exec_controls(vcpu) != 0) {
+        pr_err("RELM: VCPU%d: exec controls write failed\n", vcpu->vpid);
         return -EIO;
     }
 
-    if(_cpu_has_vpid())
-    {
-        uint64_t vpid_val = (uint64_t)vcpu->vpid;
-        PDEBUG("RELM: VCPU%d: writing VMCS_VPID=%llu\n", vcpu->vpid, vpid_val);
-        CHECK_VMWRITE(VMCS_VPID, vpid_val);
-    }
+    /* VPID — suppress TLB flushes on VM-entry/exit for this vCPU. */
+    if (_cpu_has_vpid())
+        CHECK_VMWRITE(VMCS_VPID, (uint64_t)vcpu->vpid);
 
-    if(relm_vcpu_io_bitmap_enabled(vcpu) && vcpu->arch.io_bitmap_pa)
+    /* IO bitmap addresses. */
+    if (relm_vcpu_io_bitmap_enabled(vcpu) && vcpu->arch.io_bitmap_pa)
     {
-        PDEBUG("RELM: VCPU%d: writing IO bitmap A=0x%llx B=0x%llx\n",
-               vcpu->vpid, vcpu->arch.io_bitmap_pa,
-               vcpu->arch.io_bitmap_pa + VMCS_IO_BITMAP_SIZE);
-
-        if(_vmwrite(VMCS_IO_BITMAP_A, vcpu->arch.io_bitmap_pa) != 0 ||
-           _vmwrite(VMCS_IO_BITMAP_B, vcpu->arch.io_bitmap_pa + VMCS_IO_BITMAP_SIZE) != 0)
-        {
+        if (_vmwrite(VMCS_IO_BITMAP_A, vcpu->arch.io_bitmap_pa) != 0 ||
+            _vmwrite(VMCS_IO_BITMAP_B,
+                     vcpu->arch.io_bitmap_pa + VMCS_IO_BITMAP_SIZE) != 0) {
             pr_err("RELM: VCPU%d: IO bitmap VMCS write failed\n", vcpu->vpid);
             return -EIO;
         }
     }
 
-    if(relm_vcpu_msr_bitmap_enabled(vcpu) && vcpu->arch.msr_bitmap_pa)
+    /* MSR bitmap address. */
+    if (relm_vcpu_msr_bitmap_enabled(vcpu) && vcpu->arch.msr_bitmap_pa) 
     {
-        PDEBUG("RELM: VCPU%d: writing VMCS_MSR_BITMAP=0x%llx\n",
-               vcpu->vpid, vcpu->arch.msr_bitmap_pa);
-
-        if(_vmwrite(VMCS_MSR_BITMAP, vcpu->arch.msr_bitmap_pa) != 0)
-        {
+        if (_vmwrite(VMCS_MSR_BITMAP, vcpu->arch.msr_bitmap_pa) != 0) {
             pr_err("RELM: VCPU%d: MSR bitmap VMCS write failed\n", vcpu->vpid);
             return -EIO;
         }
     }
 
-    if(vcpu->arch.vmexit_store_pa && vcpu->arch.vmexit_count > 0)
+    /* MSR load/store area addresses and counts. */
+    if (vcpu->arch.vmexit_store_pa && vcpu->arch.vmexit_count > 0) 
     {
-        if(_vmwrite(VMCS_EXIT_MSR_STORE_ADDR, vcpu->arch.vmexit_store_pa) ||
-           _vmwrite(VMCS_EXIT_MSR_STORE_COUNT, (uint64_t)vcpu->arch.vmexit_count))
-        {
-            pr_err("RELM: VCPU%d: vmexit store MSR area VMCS write failed\n",
+        if (_vmwrite(VMCS_EXIT_MSR_STORE_ADDR, vcpu->arch.vmexit_store_pa) ||
+            _vmwrite(VMCS_EXIT_MSR_STORE_COUNT, vcpu->arch.vmexit_count)) {
+            pr_err("RELM: VCPU%d: vmexit store MSR VMCS write failed\n",
                    vcpu->vpid);
             return -EIO;
         }
     }
 
-    if(vcpu->arch.vmexit_load_pa && vcpu->arch.vmentry_count > 0)
+    if (vcpu->arch.vmexit_load_pa && vcpu->arch.vmentry_count > 0) 
     {
-        if(_vmwrite(VMCS_EXIT_MSR_LOAD_ADDR, vcpu->arch.vmexit_load_pa) ||
-           _vmwrite(VMCS_EXIT_MSR_LOAD_COUNT, (uint64_t)vcpu->arch.vmentry_count))
-        {
-            pr_err("RELM: VCPU%d: vmexit load MSR area VMCS write failed\n",
-                   vcpu->vpid);
-            return -EIO;
-        }
-    }
-    
-    if(vcpu->arch.vmentry_load_pa && vcpu->arch.vmentry_count > 0)
-    {
-        if(_vmwrite(VMCS_ENTRY_MSR_LOAD_ADDR, vcpu->arch.vmentry_load_pa) ||
-           _vmwrite(VMCS_ENTRY_MSR_LOAD_COUNT, (uint64_t)vcpu->arch.vmentry_count))
-        {
-            pr_err("RELM: VCPU%d: vmentry load MSR area VMCS write failed\n",
+        if (_vmwrite(VMCS_EXIT_MSR_LOAD_ADDR, vcpu->arch.vmexit_load_pa) ||
+            _vmwrite(VMCS_EXIT_MSR_LOAD_COUNT, vcpu->arch.vmentry_count)) {
+            pr_err("RELM: VCPU%d: vmexit load MSR VMCS write failed\n",
                    vcpu->vpid);
             return -EIO;
         }
     }
 
-    PDEBUG("RELM: VCPU%d: MSR area counts: exit_store=%zu exit_load=%zu entry_load=%zu\n",
-           vcpu->vpid, vcpu->arch.vmexit_count, vcpu->arch.vmentry_count, vcpu->arch.vmentry_count);
+    if (vcpu->arch.vmentry_load_pa && vcpu->arch.vmentry_count > 0) 
+    {
+        if (_vmwrite(VMCS_ENTRY_MSR_LOAD_ADDR, vcpu->arch.vmentry_load_pa) ||
+            _vmwrite(VMCS_ENTRY_MSR_LOAD_COUNT, vcpu->arch.vmentry_count)) {
+            pr_err("RELM: VCPU%d: vmentry load MSR VMCS write failed\n",
+                   vcpu->vpid);
+            return -EIO;
+        }
+    }
 
-    /*exception vector.
-     * bit 6=#UD, bit 14=#PF. */
+    /* Exception bitmap. */
     CHECK_VMWRITE(VMCS_EXCEPTION_BITMAP,
                   (uint64_t)(vcpu->arch.exception_bitmap & 0xFFFFFFFF));
 
-    PDEBUG("RELM: VCPU%d: exception_bitmap=0x%x written to VMCS\n",
-           vcpu->vpid, vcpu->arch.exception_bitmap);
-
-   /* Count=0 means all guest CR3 loads cause VM-exits regardless of value.
-     * We can later add the guest PML4 GPA to the target list to avoid exits
-     * when the guest loads the page table root we already know about. */
+    /* CR3 target list — 0 means all CR3 loads cause exits. */
     CHECK_VMWRITE(CR3_TARGET_COUNT, 0ULL);
 
-    if(relm_apic_vmcs_setup(vcpu) != 0)
-    {
+    /* Virtual APIC VMCS fields and EPT mapping for the APIC page. */
+    if (relm_apic_vmcs_setup(vcpu) != 0) {
         pr_err("RELM: VCPU%d: APIC VMCS setup failed\n", vcpu->vpid);
         return -EIO;
     }
- 
-    if(relm_apic_ept_setup(vcpu) != 0)
-    {
+
+    if (relm_apic_ept_setup(vcpu) != 0) {
         pr_err("RELM: VCPU%d: APIC EPT setup failed\n", vcpu->vpid);
         return -EIO;
     }
 
-    pr_info("RELM: VCPU%d: Phase 2 VMCS setup complete on CPU%d\n",
-            vcpu->vpid, smp_processor_id());
+    /* CR0/CR4 constraints from VMX capability MSRs, plus guest/host masks. */
+    if (relm_setup_cr_controls(vcpu) != 0) {
+        pr_err("RELM: VCPU%d: CR controls setup failed\n", vcpu->vpid);
+        return -EIO;
+    }
 
-    return 0; 
+    /* Host state: CR0/CR3/CR4, segment selectors, TR/GDT/IDT bases,
+     * HOST_RSP (our kernel stack), HOST_RIP (vmexit_handler). */
+    if (relm_setup_host_state(vcpu) != 0) {
+        pr_err("RELM: VCPU%d: host state setup failed\n", vcpu->vpid);
+        return -EIO;
+    }
+
+    /* Guest state: long mode segments, EFER, RIP/RSP from vm->arch. */
+    if (relm_setup_guest_state_longmode(vcpu) != 0) {
+        pr_err("RELM: VCPU%d: guest state setup failed\n", vcpu->vpid);
+        return -EIO;
+    }
+
+    pr_info("RELM: VCPU%d: VMX Phase 2 complete on CPU%d\n",
+            vcpu->vpid, smp_processor_id());
+    return 0;
+}
+/*
+ * vmx_vcpu_run — VMX implementation of vcpu_arch_ops->vcpu_run.
+ *
+ * Executes VMLAUNCH (first entry, arch.launched == 0) or VMRESUME
+ * (subsequent entries). Returns 0 on a normal VM-exit, non-zero if
+ * VMLAUNCH/VMRESUME itself failed (VMfailValid / VMfailInvalid).
+ *
+ * On a normal exit the hardware has already saved guest GPRs into the
+ * area pointed to by the assembly stub, which writes them into
+ * vcpu->arch.regs before calling the C exit handler and returning here.
+ */
+
+static int vmx_vcpu_run(struct vcpu *vcpu)
+{
+    int ret;
+
+    ret = relm_vmentry_asm(&vcpu->arch.regs, vcpu->arch.launched);
+
+    if (ret != 0) {
+        pr_err("RELM: VCPU%d: VM-%s failed\n",
+               vcpu->vpid,
+               vcpu->arch.launched ? "RESUME" : "LAUNCH");
+        pr_err("RELM: VCPU%d: instruction error: %llu\n",
+               vcpu->vpid,
+               __vmread(VMCS_INSTRUCTION_ERROR_FIELD));
+        return ret;
+    }
+
+    /* Mark as launched after the first successful entry. */
+    if (!vcpu->arch.launched) {
+        vcpu->arch.launched = 1;
+        PDEBUG("RELM: VCPU%d: first VM-exit, switching to VMRESUME\n",
+               vcpu->vpid);
+    }
+
+    return 0;
+}
+/*
+ * vmx_vm_init — VMX implementation of relm_vm_operations->vm_init.
+ *
+ * Called by relm_create_vm() after mem_ops->setup() has run.
+ * mem_ops->setup already allocated the EPT context and mapped guest RAM,
+ * so there is nothing additional for VMX to do at the VM level right now.
+ *
+ * Future uses: per-VM posted-interrupt descriptor tables, PASID setup
+ * for device assignment, VM-function EPTP list initialisation.
+ */
+static int vmx_vm_init(struct relm_vm *vm)
+{
+    (void)vm;
+    return 0;
 }
 
+/*
+ * vmx_vm_destroy — VMX implementation of relm_vm_operations->vm_destroy.
+ *
+ * Called by relm_destroy_vm() before mem_ops->destroy().
+ * EPT teardown is handled by mem_ops->destroy (vmx_mem_destroy in ept.c),
+ * so nothing to do here currently.
+ *
+ * Future uses: free posted-interrupt tables, release PASID domains.
+ */
+static void vmx_vm_destroy(struct relm_vm *vm)
+{
+    (void)vm;
+}
 void relm_free_io_bitmap(struct vcpu *vcpu)
 {
     if(!vcpu)
@@ -1463,7 +1527,61 @@ void relm_free_io_bitmap(struct vcpu *vcpu)
         vcpu->arch.io_bitmap_pa = 0;
     }
 }
+/*
+ * vmx_setup_mmu — EPT setup for a specific vCPU.
+ *
+ * The VM-level EPT context was created by mem_ops->setup() in relm_create_vm.
+ * Per-vCPU EPT pointer is written to VMCS in vmx_vcpu_init (EPT_POINTER field).
+ * Nothing additional needed here currently unless you add per-vCPU EPT views
+ * (e.g. for VM-functions / EPTP switching).
+ */
+static int vmx_setup_mmu(struct vcpu *vcpu)
+{
+    (void)vcpu;
+    return 0;
+}
 
+/*
+ * vmx_inject_irq — inject a virtual interrupt into the guest.
+ *
+ * Uses the VM-entry interrupt-information field. The interrupt is delivered
+ * on the next VM-entry if the guest's RFLAGS.IF is set (for external interrupts)
+ * or unconditionally (for NMIs / exceptions depending on type).
+ *
+ * TODO: implement using VMCS VM_ENTRY_INTR_INFO_FIELD.
+ */
+static int vmx_inject_irq(struct vcpu *vcpu, unsigned int vector)
+{
+    (void)vcpu;
+    (void)vector;
+    return -ENOSYS;
+}
+
+/*
+ * vmx_read_msr / vmx_write_msr — guest MSR access emulation.
+ *
+ * Called by the generic exit handler for RDMSR/WRMSR exits that were not
+ * suppressed by the MSR bitmap. Returns -EINVAL for unsupported MSRs so
+ * the exit handler can inject #GP into the guest.
+ *
+ * TODO: implement per-MSR handling (currently the MSR bitmap passthrough
+ * handles most MSRs; intercepts are only for IA32_SYSENTER_CS).
+ */
+static int vmx_read_msr(struct vcpu *vcpu, uint32_t msr, uint64_t *val)
+{
+    (void)vcpu;
+    (void)msr;
+    (void)val;
+    return -EINVAL;
+}
+
+static int vmx_write_msr(struct vcpu *vcpu, uint32_t msr, uint64_t val)
+{
+    (void)vcpu;
+    (void)msr;
+    (void)val;
+    return -EINVAL;
+}
 void relm_free_msr_bitmap(struct vcpu *vcpu)
 {
     if(!vcpu)
@@ -1476,6 +1594,7 @@ void relm_free_msr_bitmap(struct vcpu *vcpu)
         vcpu->arch.msr_bitmap_pa = 0;
     }
 }
+
 
 void relm_free_vmcs_region(struct vcpu *vcpu)
 {
@@ -1498,21 +1617,27 @@ static void relm_free_vmxon_region(struct host_cpu *hcpu)
 }
 
 /* Free the entire VCPU */
-void relm_free_vcpu(struct vcpu *vcpu)
+static void vmx_vcpu_free(struct vcpu *vcpu)
 {
     if (!vcpu)
         return;
 
-    relm_apic_free(&vcpu->arch.apic); 
+    relm_apic_free(&vcpu->arch.apic);
     relm_free_all_msr_areas(vcpu);
     relm_free_msr_bitmap(vcpu);
     relm_free_io_bitmap(vcpu);
     relm_free_vmcs_region(vcpu);
-    
-    if(vcpu->host_stack)
-        free_pages((unsigned long)vcpu->host_stack, HOST_STACK_ORDER);
-    
-    kfree(vcpu);
+}
+
+static void vmx_vcpu_destroy(struct vcpu *vcpu)
+{
+    if (!vcpu)
+        return;
+
+    PDEBUG("RELM: VCPU%d: VMCLEAR on CPU%d (thread exit)\n",
+           vcpu->vpid, smp_processor_id());
+
+    relm_vmclear(vcpu);
 }
 
 static int relm_setup_host_state(struct vcpu *vcpu)
@@ -2209,22 +2334,22 @@ int relm_cr3_cache_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
     uint64_t guest_rip;
  
     const uint64_t *gpr_table[] = {
-        vcpu->arch.regs.rax,
-        vcpu->arch.regs.rcx,
-        vcpu->arch.regs.rdx,
-        vcpu->arch.regs.rbx,
-        vcpu->arch.regs.rsp,   /* guest RSP — distinct from host RSP */
-        vcpu->arch.regs.rbp,
-        vcpu->arch.regs.rsi,
-        vcpu->arch.regs.rdi,
-        vcpu->arch.regs.r8,
-        vcpu->arch.regs.r9,
-        vcpu->arch.regs.r10,
-        vcpu->arch.regs.r11,
-        vcpu->arch.regs.r12,
-        vcpu->arch.regs.r13,
-        vcpu->arch.regs.r14,
-        vcpu->arch.regs.r15,
+        &vcpu->arch.regs.rax,
+        &vcpu->arch.regs.rcx,
+        &vcpu->arch.regs.rdx,
+        &vcpu->arch.regs.rbx,
+        &vcpu->arch.regs.rsp,   /* guest RSP — distinct from host RSP */
+        &vcpu->arch.regs.rbp,
+        &vcpu->arch.regs.rsi,
+        &vcpu->arch.regs.rdi,
+        &vcpu->arch.regs.r8,
+        &vcpu->arch.regs.r9,
+        &vcpu->arch.regs.r10,
+        &vcpu->arch.regs.r11,
+        &vcpu->arch.regs.r12,
+        &vcpu->arch.regs.r13,
+        &vcpu->arch.regs.r14,
+        &vcpu->arch.regs.r15,
     };
  
     /* Bounds-check src_reg. Values 0–15 are valid (4 bits from hardware).
@@ -2296,45 +2421,7 @@ void relm_cr3_cache_dump(const struct cr3_shadow_cache *cache)
     }
 }
  
-
-int relm_init_vmcs_state(struct vcpu *vcpu)
-{
-    if(!vcpu)
-        return -EINVAL; 
-
-    int ret;
-
-    PDEBUG("RELM: VCPU%d: setting up CR controls (CR0/CR4 constraints)\n",
-           vcpu->vpid);
-
-    if((ret = relm_setup_cr_controls(vcpu)) != 0)
-    {
-        pr_err("RELM: VCPU%d: CR controls setup failed: %d\n", vcpu->vpid, ret);
-        return -1;
-    }
- 
-    if((ret = relm_setup_host_state(vcpu)) != 0)
-    {
-        pr_err("RELM: VCPU%d: host state setup failed: %d\n", vcpu->vpid, ret);
-        return -1;
-    }
- 
-    if((ret = relm_setup_guest_state_longmode(vcpu)) != 0)
-    {
-        pr_err("RELM: VCPU%d: firmware guest state setup failed: %d\n",
-               vcpu->vpid, ret);
-        return -1;
-    }
- 
-    pr_info("RELM: VCPU%d: VMCS host+guest state written on CPU%d"
-            " (CR0=0x%lx CR4=0x%lx RIP=0x%lx RSP=0x%lx)\n",
-            vcpu->vpid, smp_processor_id(),
-            vcpu->arch.cr0, vcpu->arch.cr4, vcpu->arch.regs.rip, vcpu->arch.regs.rsp);
- 
-    return 0;
-}
-
-void relm_dump_vcpu(struct vcpu *vcpu)
+void vmx_dump_vcpu(struct vcpu *vcpu)
 {
     pr_info("\n*** Guest State ***\n\n");     
 
