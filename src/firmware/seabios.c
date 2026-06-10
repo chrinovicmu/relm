@@ -82,7 +82,7 @@ int relm_seabios_load(struct relm_vm *vm, struct device *dev)
         gpa = SEABIOS_ROM_TOP_GPA + offset; 
         hpa = seabios_pa + offset; 
 
-        ret = relm_ept_map_page(vm->ept, gpa, hpa, SEABIOS_EPT_FLAGS);
+        ret = relm_ept_map_page(vm->arch.ept, gpa, hpa, SEABIOS_EPT_FLAGS);
         if(ret)
         {
             pr_err("RELM: SeaBIOS: EPT map failed at GPA=0x%llx "

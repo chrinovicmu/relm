@@ -97,7 +97,7 @@ int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_s
     uint64_t hpa;
     int ret;
 
-    if(!vm || !vm->ept)
+    if(!vm)
         return -EINVAL;
 
     /*align size to page boundary */ 
@@ -121,7 +121,10 @@ int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_s
     region->gpa_start = gpa_start;
     region->size = size;
     region->nr_pages = num_pages;
-    region->flags = EPT_RWX;
+
+    region->flags = RELM_MEM_F_READ |
+        RELM_MEM_F_WRITE | 
+        RELM_MEM_F_EXEC;
 
     for(i = 0; i < num_pages; i++ )
     {
@@ -138,7 +141,7 @@ int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_s
         gpa = gpa_start + (i * PAGE_SIZE);
         hpa = PFN_PHYS(page_to_pfn(page));
 
-        ret = relm_ept_map_page(vm->ept, gpa, hpa, EPT_RWX);
+        ret = vm->mem_ops->map_page(vm, gpa, hpa, region->flags);
         if(ret < 0)
         {
             pr_err("RELM: Failed to map page at GPA 0x%llx\n", gpa);
@@ -160,7 +163,7 @@ int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_s
 
     pr_info("RELM: Successfully allocated and mapped guest RAM\n");
    
-  //  relm_ept_invalidate_context(vm->ept);
+  //  relm_ept_invalidate_context(vm->arch.ept);
    
     return 0;
 
@@ -184,7 +187,7 @@ int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa,
     uint64_t current_gpa, current_hpa; 
     int ret; 
 
-    if(!vm || !vm->ept)
+    if(!vm || !vm->arch.ept)
         return -EINVAL; 
 
     if(size == 0)
@@ -197,8 +200,12 @@ int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa,
         return -EINVAL; 
     }
 
-    num_pages = size / PAGE_SIZE; 
-    mmio_flags = EPT_ACCESS_READ | EPT_ACCESS_WRITE | EPT_MEMTYPE_UC | EPT_IGNORE_PAT; 
+    num_pages = size / PAGE_SIZE;
+
+    mmio_flags = RELM_MEM_F_READ | 
+        RELM_MEM_F_WRITE | 
+        RELM_MEM_F_MMIO;  
+
 
     pr_info("RELM: Mapping MMIO region GPA 0x%llx -> HPA 0x%llx (%llu pages)\n", 
             gpa, hpa, num_pages); 
@@ -217,7 +224,7 @@ int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa,
         current_gpa = gpa + (i * PAGE_SIZE); 
         current_hpa = hpa + (i * PAGE_SIZE);
 
-        ret = relm_ept_map_page(vm->ept, current_gpa, current_hpa, mmio_flags); 
+        ret = vm->mem_ops->map_pagee(vm, current_gpa, current_hpa, mmio_flags); 
         if(ret < 0){
             pr_err("RELM: Failed to map MMIO page GPA 0x%llx -> HPA 0x%llx (%d)\n", 
                    current_gpa, current_hpa, ret); 
@@ -231,9 +238,16 @@ int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa,
 
 _cleanup:
     while(i--)
-        relm_ept_unmap_page(vm->ept, gpa + (i * PAGE_SIZE)); 
+        relm_ept_unmap_page(vm->arch.ept, gpa + (i * PAGE_SIZE)); 
     kfree(region); 
     return ret; 
+}
+int relm_vm_create_guest_page_tables(struct relm_vm *vm)
+{
+    if (!vm || !vm->mem_ops || !vm->mem_ops->create_guest_page_tables)
+        return -EINVAL;
+
+    return vm->mem_ops->create_guest_page_tables(vm);
 }
 
 void relm_vm_free_guest_mem(struct relm_vm *vm)
@@ -292,38 +306,16 @@ struct relm_vm * relm_create_vm(int vm_id, const char *vm_name,
         snprintf(vm->vm_name, sizeof(vm->vm_name), "vm-%d", vm_id);
 
     spin_lock_init(&vm->lock);
- 
-   
-    if(!relm_ept_check_support())
-    {
-        pr_err("relm: EPT not supported on this CPU\n");
-      //  goto _out_free_vm;
-        return NULL;
-    }
-    pr_info("EPT is supported on this CPU\n"); 
 
-    /*
-    ->ept = relm_ept_context_create();
-    if(IS_ERR(vm->ept))
-    {
-        pr_err("relm: Failed to create EPT context\n");
-        vm->ept = NULL;
-        return NULL; 
-       // goto _out_free_vm;
-    }
 
- i*/ 
+    /*assign the arch mem_ops tables */ 
+    vm->mem_ops = &RELM_ARCH_MEM_OPS; 
 
-    ret = relm_setup_ept(vm); 
-    if(ret < 0)
-    {
-        pr_err("RELM: Failed to setup EPT context in VM\n"); 
+    if(vm-<mem_ops->setup(vm) < 0){
+
+        pr_err("RELM: mem_ops->setup failed\n"); 
         goto _out_free_vm; 
-        return NULL; 
     }
-
-    pr_info("RELM: Created EPT context for VM %d (EPTP=0x%llx)\n",
-            vm_id, vm->ept->eptp);
 
     if(ram_size > 0)
     {
@@ -339,12 +331,12 @@ struct relm_vm * relm_create_vm(int vm_id, const char *vm_name,
         ret = relm_vm_create_guest_page_tables(vm); 
         if(ret < 0)
         {
-            pr_err("Failed to create map Guest page tables to EPT\n"); 
+            pr_err("Failed to create map Guest page tables\n"); 
             goto _out_free_ept; 
             return NULL; 
         }
         PDEBUG("RELM: Guest PML4_GPA=0x%llu\n",
-               vm->pml4_gpa); 
+               vm->arch.pml4_gpa); 
     }
 
     vm->vcpus = kcalloc(vm->max_vcpus, sizeof(struct vcpu*), GFP_KERNEL);
@@ -364,10 +356,10 @@ struct relm_vm * relm_create_vm(int vm_id, const char *vm_name,
 _out_free_memory:
     relm_vm_free_guest_mem(vm);
 _out_free_ept:
-    if(vm->ept)
+    if(vm->arch.ept)
     {
-        relm_ept_context_destroy(vm->ept);
-        vm->ept = NULL;
+        relm_ept_context_destroy(vm->arch.ept);
+        vm->arch.ept = NULL;
     }
 _out_free_vm:
     kfree(vm);
@@ -402,10 +394,10 @@ void relm_destroy_vm(struct relm_vm *vm)
 
     relm_vm_free_guest_mem(vm);
 
-    if(vm->ept)
+    if(vm->arch.ept)
     {
-        relm_ept_context_destroy(vm->ept);
-        vm->ept = NULL;
+        relm_ept_context_destroy(vm->arch.ept);
+        vm->arch.ept = NULL;
     }
 
     kfree(vm);
@@ -699,72 +691,6 @@ int relm_vm_zero_guest_memory(struct relm_vm *vm, uint64_t gpa, size_t size)
     return (int)zeroed;
 }
 
-int relm_vm_create_guest_page_tables(struct relm_vm *vm)
-{
-    uint64_t *pml4; 
-    uint64_t *pdpt;      
-    uint64_t *pd;       
-    uint64_t pml4_gpa, pdpt_gpa, pd_gpa;
-    uint64_t pml4_hpa, pdpt_hpa, pd_hpa;
-    int i;
-
-    if (!vm || !vm->ept)
-        return -EINVAL;
-
-    /* allocate 3 pages for page tables (PML4, PDPT, PD)
-    * from guest RAM at a high address to avoid conflicts */ 
-    
-    uint64_t pt_base_gpa = vm->total_guest_ram - (3 * PAGE_SIZE);
-    
-    pr_info("RELM: Creating guest page tables at GPA 0x%llx\n", pt_base_gpa);
-    
-    struct page *pml4_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-    struct page *pdpt_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-    struct page *pd_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-    
-    if (!pml4_page || !pdpt_page || !pd_page){
-        if (pml4_page) __free_page(pml4_page);
-        if (pdpt_page) __free_page(pdpt_page);
-        if (pd_page) __free_page(pd_page);
-        return -ENOMEM;
-    }
-    
-    pml4_hpa = PFN_PHYS(page_to_pfn(pml4_page));
-    pdpt_hpa = PFN_PHYS(page_to_pfn(pdpt_page));
-    pd_hpa = PFN_PHYS(page_to_pfn(pd_page));
-    
-    pml4_gpa = pt_base_gpa;
-    pdpt_gpa = pt_base_gpa + PAGE_SIZE;
-    pd_gpa = pt_base_gpa + (2 * PAGE_SIZE);
-    
-    /* map them in EPT */ 
-    relm_ept_map_page(vm->ept, pml4_gpa, pml4_hpa, EPT_RWX);
-    relm_ept_map_page(vm->ept, pdpt_gpa, pdpt_hpa, EPT_RWX);
-    relm_ept_map_page(vm->ept, pd_gpa, pd_hpa, EPT_RWX);
-    
-    pml4 = page_address(pml4_page);
-    pdpt = page_address(pdpt_page);
-    pd = page_address(pd_page);
-    
-    // PML4[0] ->  PDPT
-    pml4[0] = pdpt_gpa | 0x7;  // Present, R/W, User
-    
-    // PDPT[0] -> PD
-    pdpt[0] = pd_gpa | 0x7; 
-    
-    /* PD entries: Identity map first 1GB using 2MB pages
-    *each PD entry covers 2MB */ 
-    for (i = 0; i < 512; i++) {
-        // Bit 7 (PS) = 1 for 2MB pages
-        pd[i] = (i * 0x200000ULL) | 0x87;  // Present, R/W, User, PS
-    }
-    
-    vm->pml4_gpa = pml4_gpa;
-    
-    pr_info("RELM: Guest page tables created - PML4_GPA = 0x%llx\n", pml4_gpa);
-    
-    return 0;
-}
 /**
  * relm_vm_add_vcpu - Creates and pins a VCPU to a specific host CPU.
  * @vm: The parent virtual machine struct.

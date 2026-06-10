@@ -130,7 +130,7 @@ void relm_apic_init(struct virt_apic *apic, uint8_t apic_id)
 
 int relm_apic_vmcs_setup(struct vcpu *vcpu)
 {
-    struct virt_apic *apic = &vcpu->apic; 
+    struct virt_apic *apic = &vcpu->arch.apic; 
     uint64_t msr; 
     uint32_t allowed1; 
     bool apic_reg_virt_ok; 
@@ -217,7 +217,7 @@ int relm_apic_vmcs_setup(struct vcpu *vcpu)
 
 int relm_apic_ept_setup(struct vcpu *vcpu)
 {
-    struct virt_apic *apic = &vcpu->apic; 
+    struct virt_apic *apic = &vcpu->arch.apic; 
     struct relm_vm *vm = vcpu->vm; 
     int ret; 
 
@@ -622,7 +622,7 @@ void relm_apic_inject_interrupt(struct virt_apic *apic, uint8_t vector,
 
 int relm_apic_read(struct vcpu *vcpu, uint32_t offset, uint32_t *value)
 {
-    struct virt_apic *apic = &vcpu->apic;
+    struct virt_apic *apic = &vcpu->arch.apic;
     uint32_t word;  
  
     if(offset & 0x3U)
@@ -784,7 +784,7 @@ int relm_apic_read(struct vcpu *vcpu, uint32_t offset, uint32_t *value)
  * */ 
 int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
 {
-    struct virt_apic * apic = &vcpu->apic; 
+    struct virt_apic * apic = &vcpu->arch.apic; 
 
     /*silenty ignore unaligned writes */ 
     if(offset & 0x3U)
@@ -1010,7 +1010,7 @@ int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
 
 int relm_apic_handle_access(struct vcpu *vcpu)
 {
-    struct virt_apic *apic = &vcpu->apic; 
+    struct virt_apic *apic = &vcpu->arch.apic; 
 
     uint64_t qual; 
     uint32_t offset; 

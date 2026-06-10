@@ -356,7 +356,7 @@ int relm_boot_params_build(struct relm_vm *vm,
         }
     }
 
-    vm->boot_params_gpa = RELM_BOOT_PARAMS_GPA;
+    vm->arch.boot_params_gpa = RELM_BOOT_PARAMS_GPA;
 
     pr_info("RELM: linux_loader: boot_params @ GPA 0x%llx "
             "(cmdline=0x%x initrd=0x%x/%u e820_entries=%u)\n",
@@ -410,12 +410,12 @@ int relm_linux_loader_setup(struct relm_vm *vm,
         return ret;
     }
 
-    vm->kernel_entry_gpa = entry_gpa;
+    vm->arch.kernel_entry_gpa = entry_gpa;
 
     pr_info("RELM: linux_loader: setup complete\n");
     pr_info("RELM:   kernel entry (startup_64) GPA = 0x%llx\n", entry_gpa);
     pr_info("RELM:   boot_params (zero page)  GPA = 0x%llx\n",
-            (unsigned long long)vm->boot_params_gpa);
+            (unsigned long long)vm->arch.boot_params_gpa);
     pr_info("RELM:   guest will enter directly in 64-bit long mode\n");
 
     return 0;
@@ -423,7 +423,7 @@ int relm_linux_loader_setup(struct relm_vm *vm,
 
 uint64_t relm_linux_loader_entry_gpa(const struct relm_vm *vm)
 {
-    return vm ? vm->kernel_entry_gpa : 0;
+    return vm ? vm->arch.kernel_entry_gpa : 0;
 }
 
 static int relm_write_gdt_entry(struct relm_vm *vm, 

@@ -8,6 +8,7 @@
 
 struct vcpu; 
 struct relm_vm_operations; 
+struct relm_mem_ops; 
 
 #define RELM_VM_NAME_LEN    16 
 #define RELM_MAX_VCPUS 1  
@@ -58,6 +59,7 @@ struct relm_vm
 
     struct guest_mem_region *mem_regions; 
     uint64_t total_guest_ram; 
+    const struct relm_mem_ops *mem_ops; 
 
     int max_vcpus;
     int online_vcpus;
@@ -90,6 +92,28 @@ struct relm_vm_operations{
     void (*print_stats)(struct relm_vm *vm); 
 }; 
 
+struct relm_mem_ops
+{
+    /*allocate and initialize arch page tables root
+     * EPT root on x86, VTTBR/s2_pgd on arm64, hgatp on riscv*/ 
+    int (*setup)(struct relm_vm *vm); 
+    
+    /*map single guest page*/     
+    int(*map_page)(struct relm_vm *vm, uint64_t gpa, 
+                   uint64_t hpa, uint64_t flags); 
+    
+    /*unmap single guest page*/ 
+    void (*unmap)(struct relm_vm *vm, uint64_t gpa); 
+
+    /*build guest visiable page tbals inside guest RAM*/ 
+    int (*create_guest_page_tables)(struct relm_vm *vm); 
+
+    /*invalidate cached translation*/ 
+    void (*invalidate)(struct relm_vm *vm);
+
+    /*destroy all allocated by setup*/ 
+    void (*destroy)(struct relm_vm *vm); 
+}; 
 
 struct relm_vm * relm_create_vm(int vm_id, const char *name, uint64_t ram_size); 
 void relm_destroy_vm(struct relm_vm *vm); 

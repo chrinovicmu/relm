@@ -1800,13 +1800,13 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     entry_controls |= VM_ENTRY_IA32E_MODE;          
     CHECK_VMWRITE(VMCS_ENTRY_CONTROLS, entry_controls);
 
-    if(!vcpu->vm->pml4_gpa)
+    if(!vcpu->vm->arch.pml4_gpa)
     {
         pr_err("RELM: VCPU%d: longmode: vm->pml4_gpa not set\n", vcpu->vpid);
         return -EINVAL;
     }
     CHECK_VMWRITE(GUEST_CR3, vcpu->vm->pml4_gpa);
-    vcpu->arch.cr3 = vcpu->vm->pml4_gpa;
+    vcpu->arch.cr3 = vcpu->vm->arch.pml4_gpa;
 
     efer = EFER_LME | EFER_LMA | EFER_SCE;
     CHECK_VMWRITE(GUEST_IA32_EFER, efer);
@@ -1873,7 +1873,7 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     CHECK_VMWRITE(GUEST_RIP, entry_rip);
 
     /*RSI = boot_params */ 
-    entry_rsi = vcpu->vm->boot_params_gpa;
+    entry_rsi = vcpu->vm->arch.boot_params_gpa;
     if(!entry_rsi)
     {
         pr_err("RELM: VCPU%d: longmode: vm->boot_params_gpa not set\n",

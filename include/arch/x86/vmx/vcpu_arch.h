@@ -3,19 +3,7 @@
 
 /*
  * include/arch/x86/vmx/vcpu_arch.h
- *
  * Defines 'struct vcpu_arch' for the x86 VMX backend.
- *
- * This file is selected by the Makefile via:
- *   ARCH_INCLUDE_DIR = include/arch/x86/vmx
- *   CFLAGS += -I$(ARCH_INCLUDE_DIR) -I<parent_so_relm_arch_resolves>
- *
- * The generic struct vcpu embeds this as:
- *   struct vcpu_arch arch;
- *
- * Everything that was previously scattered in vmx.h and vmcs_state.h
- * that is *per-vCPU* lives here.  Shared per-host-CPU state (VMXON
- * region) lives in struct host_cpu, unchanged.
  */
 
 #include <include/arch/x86/vmx/vmcs.h>

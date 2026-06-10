@@ -15,6 +15,66 @@
 #include <include/vmcs_state.h>
 #include <utils/utils.h>
 
+
+static int vmx_mem_setup(struct relm_vm *vm)
+{
+    return relm_setup_ept(vm); 
+}
+
+static int vmx_mem_map_page(struct relm_vm *vm, 
+                            uint64_t gpa, uint64_t hpa, uint64_t flags)
+{
+    /*Translate generic RELM_MEM_F_ *flags to EPT bits*/ 
+    uint64_t ept_flags = 0; 
+
+    if (flags & RELM_MEM_F_READ) 
+        ept_flags |= EPT_ACCESS_READ;
+    
+    if (flags & RELM_MEM_F_WRITE) 
+        ept_flags |= EPT_ACCESS_WRITE;
+    
+    if (flags & RELM_MEM_F_EXEC)  
+        ept_flags |= EPT_ACCESS_EXEC;
+
+    if (flags & RELM_MEM_F_MMIO)  
+        ept_flags |= EPT_MEMTYPE_UC | EPT_IGNORE_PAT;
+
+    return relm_ept_map_page(vm->arch.ept, gpa, hpa, ept_flags); 
+}
+
+static void vmx_mem_unmap_page(struct relm_vm *vm, uint64_t gpa)
+{
+    relm_ept_unmap_page(vm->arch.ept, gpa);
+}
+
+static int vmx_mem_create_guest_page_tables(struct relm_vm *vm)
+{
+    return relm_ept_create_guest_page_tables_vmx(vm);
+}
+
+static void vmx_mem_invalidate(struct relm_vm *vm)
+{
+    relm_ept_invalidate_context(vm->arch.ept);
+}
+
+static void vmx_mem_destroy(struct relm_vm *vm)
+{
+    if (vm->arch.ept) {
+        relm_ept_context_destroy(vm->arch.ept);
+        vm->arch.ept = NULL;
+    }
+}
+
+/*vmx_mem_ops : table assigned to vm->mem_ops for every VMX guest*/ 
+const struct relm_mem_ops vmx_mem_ops = {
+    .setup                    = vmx_mem_setup,
+    .map_page                 = vmx_mem_map_page,
+    .unmap_page               = vmx_mem_unmap_page,
+    .create_guest_page_tables = vmx_mem_create_guest_page_tables,
+    .invalidate               = vmx_mem_invalidate,
+    .destroy                  = vmx_mem_destroy,
+};
+
 static inline void _invept(uint64_t type, uint64_t eptp)
 {
     struct{
@@ -89,24 +149,24 @@ int relm_setup_ept(struct relm_vm *vm)
         return -EINVAL; 
     }
 */ 
-    vm->ept = relm_ept_context_create(); 
-    if(IS_ERR(vm->ept))
+    vm->arch.ept = relm_ept_context_create(); 
+    if(IS_ERR(vm->arch.ept))
     {
-        int err = PTR_ERR(vm->ept); 
-        vm->ept = NULL; 
+        int err = PTR_ERR(vm->arch.ept); 
+        vm->arch.ept = NULL; 
         pr_err("RELM: Failed to create EPT context: %d\n"); 
         return err; 
     }
 
    // pr_info("RELM: EPT setup complete for VM %d (EPTP=0x%llx)\n", 
-    //        vm->vm_id, vm->ept->eptp); 
+    //        vm->vm_id, vm->arch.ept->eptp); 
 
     return 0; 
 }
 
 int relm_handle_ept_violation(struct relm_vm *vm)
 {
-    if(!vm || vm->ept)
+    if(!vm || vm->arch.ept)
         return -ENAVAIL; 
 
     uint64_t exit_qualification;
@@ -146,8 +206,8 @@ int relm_vcpu_handle_ept_misconfig(struct relm_vm *vm)
     pr_err("  Guest RIP: 0x%llx\n", __vmread(GUEST_RIP));
     pr_err("  This indicates a bug in EPT setup code!\n");
     
-    if(vm->ept)
-        relm_ept_dump_tables(vm->ept); 
+    if(vm->arch.ept)
+        relm_ept_dump_tables(vm->arch.ept); 
 
     return -EFAULT; 
 
@@ -480,6 +540,73 @@ int relm_ept_unmap_page(struct ept_context *ept, uint64_t gpa)
     PDEBUG("RELM: Unmapped GPA 0x%llx\n", gpa);
 
     return 0; 
+}
+
+int relm_ept_create_guest_page_tables(struct relm_vm *vm)
+{
+    uint64_t *pml4; 
+    uint64_t *pdpt;      
+    uint64_t *pd;       
+    uint64_t pml4_gpa, pdpt_gpa, pd_gpa;
+    uint64_t pml4_hpa, pdpt_hpa, pd_hpa;
+    int i;
+
+    if (!vm || !vm->arch.ept)
+        return -EINVAL;
+
+    /* allocate 3 pages for page tables (PML4, PDPT, PD)
+    * from guest RAM at a high address to avoid conflicts */ 
+    
+    uint64_t pt_base_gpa = vm->total_guest_ram - (3 * PAGE_SIZE);
+    
+    pr_info("RELM: Creating guest page tables at GPA 0x%llx\n", pt_base_gpa);
+    
+    struct page *pml4_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+    struct page *pdpt_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+    struct page *pd_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+    
+    if (!pml4_page || !pdpt_page || !pd_page){
+        if (pml4_page) __free_page(pml4_page);
+        if (pdpt_page) __free_page(pdpt_page);
+        if (pd_page) __free_page(pd_page);
+        return -ENOMEM;
+    }
+    
+    pml4_hpa = PFN_PHYS(page_to_pfn(pml4_page));
+    pdpt_hpa = PFN_PHYS(page_to_pfn(pdpt_page));
+    pd_hpa = PFN_PHYS(page_to_pfn(pd_page));
+    
+    pml4_gpa = pt_base_gpa;
+    pdpt_gpa = pt_base_gpa + PAGE_SIZE;
+    pd_gpa = pt_base_gpa + (2 * PAGE_SIZE);
+    
+    /* map them in EPT */ 
+    relm_ept_map_page(vm->arch.ept, pml4_gpa, pml4_hpa, EPT_RWX);
+    relm_ept_map_page(vm->arch.ept, pdpt_gpa, pdpt_hpa, EPT_RWX);
+    relm_ept_map_page(vm->arch.ept, pd_gpa, pd_hpa, EPT_RWX);
+    
+    pml4 = page_address(pml4_page);
+    pdpt = page_address(pdpt_page);
+    pd = page_address(pd_page);
+    
+    // PML4[0] ->  PDPT
+    pml4[0] = pdpt_gpa | 0x7;  // Present, R/W, User
+    
+    // PDPT[0] -> PD
+    pdpt[0] = pd_gpa | 0x7; 
+    
+    /* PD entries: Identity map first 1GB using 2MB pages
+    *each PD entry covers 2MB */ 
+    for (i = 0; i < 512; i++) {
+        // Bit 7 (PS) = 1 for 2MB pages
+        pd[i] = (i * 0x200000ULL) | 0x87;  // Present, R/W, User, PS
+    }
+    
+    vm->arch.pml4_gpa = pml4_gpa;
+    
+    pr_info("RELM: Guest page tables created - PML4_GPA = 0x%llx\n", pml4_gpa);
+    
+    return 0;
 }
 
 /*walk EPT tables to find the HPA of given GPA */  
