@@ -69,7 +69,8 @@ struct relm_vm
 
     enum vm_state state; 
     struct relm_vm_stats stats; 
-    const struct relm_vm_operations *ops; 
+    const struct relm_vm_operations *ops; /*points at ops_storage*/ 
+    struct relm_vm_operations ops_storage; /*merged arch+generic*/ 
 
     struct relm_vm_arch arch; 
 

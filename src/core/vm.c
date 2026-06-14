@@ -80,6 +80,27 @@ static const struct relm_vm_operations relm_generic_vm_ops = {
     .dump_regs = relm_op_dump_regs,
 };
 
+/*build final ops table for a VM
+ * arch provides vm_init and destroy_vm, generic provides everything else*/ 
+static void relm_vm_ops_merg(struct relm_vm *vm, 
+                             const struct relm_vm_operations *arch_ops)
+{
+    struct relm_vm_operations *merged = &vm->ops_storage;
+    *merged = &arch_ops; 
+
+    /*patch generic defaults for any NULL introspection slots*/
+    if(!merged->get_uptime)
+        merged->get_uptime = relm_generic_vm_ops.get_uptime; 
+    if(!merged>get_cpu_utilization)
+        merged->get_cpu_utilization = relm_generic_vm_ops->get_cpu_utilization; 
+    if (!merged->print_stats)
+        merged->print_stats = relm_generic_vm_ops.print_stats;
+    if (!merged->dump_regs)
+        merged->dump_regs = relm_generic_vm_ops.dump_regs;
+
+    vm->ops = merged; 
+}
+
 int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_start)
 {
     struct guest_mem_region *region;
@@ -281,28 +302,22 @@ struct relm_vm * relm_create_vm(int vm_id, const char *vm_name,
 
     vm = kzalloc(sizeof(struct relm_vm), GFP_KERNEL);
     if(!vm)
-    {
-        pr_err("RELM: Failed to allocate VM header\n");
         return NULL;
-    }
 
     vm->vm_id = vm_id;
     vm->state = VM_STATE_CREATED;
     vm->max_vcpus = RELM_MAX_VCPUS;
-    vm->online_vcpus = 0;
-
-   // vm->ops = &relm_default_ops;
+    spin_lock_init(&vm->lock); 
 
     if(vm_name)
         strscpy(vm->vm_name, vm_name, sizeof(vm->vm_name));
     else
         snprintf(vm->vm_name, sizeof(vm->vm_name), "vm-%d", vm_id);
 
-    spin_lock_init(&vm->lock);
-
 
     /*assign the arch mem_ops tables */ 
-    vm->mem_ops = &RELM_ARCH_MEM_OPS; 
+    vm->mem_ops = &RELM_ARCH_MEM_OPS;
+    relm_vm_ops_merg(vm, &RELM_ARCH_VM_OPS); 
 
     if(vm-<mem_ops->setup(vm) < 0){
 
