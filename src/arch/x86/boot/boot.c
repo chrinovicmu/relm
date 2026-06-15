@@ -10,9 +10,9 @@
 #include <linux/mm.h>
 
 #include <include/vm.h>
-#include <include/ept.h>
-#include <include/firmware/e820.h>
 #include <include/boot/linux_loader.h>
+#include <include/boot/arch/x86/loader.h> 
+#include <include/firmware/e820.h>
 #include <utils/utils.h>
 
 static int relm_guest_write_u8(struct relm_vm *vm, uint64_t gpa, uint8_t v)
@@ -368,57 +368,85 @@ int relm_boot_params_build(struct relm_vm *vm,
 
 }
 
-int relm_linux_loader_setup(struct relm_vm *vm,
-                            struct device *dev,
-                            const char *cmdline)
+
+int relm_boot_load(struct relm_vm *vm, 
+                   struct device dev, 
+                   const struct relm_boot_config *cfg)
 {
-    struct relm_setup_header hdr;
-    uint64_t entry_gpa = 0;
+    const char *cmdline     = cfg ? cfg->cmdline     : NULL;
+    const char *kernel_name = cfg ? cfg->kernel_name : NULL;
+    const char *initrd_name = cfg ? cfg->initrd_name : NULL;
+
+    if(!kernel_name) 
+        kernel_name = RELM_KERNEL_FW_NAME;
+    if(!initrd_name) 
+        initrd_name = RELM_INITRD_FW_NAME;
+
+    struct relm_setup_header hdr; 
+    uint64_t entry_gpa   = 0;
     uint32_t initrd_size = 0;
     int ret;
 
-    if(!vm || !dev)
+    if (!vm || !dev)
         return -EINVAL;
 
-    pr_info("RELM: linux_loader: starting direct kernel boot setup\n");
+    pr_info("RELM: x86 boot: starting direct kernel boot (bzImage protocol)\n");
+    pr_info("RELM: x86 boot: kernel='%s' initrd='%s'\n",
+            kernel_name, initrd_name);
 
     ret = relm_kernel_load(vm, dev, &hdr, &entry_gpa);
-    if(ret)
+    if (ret) 
     {
-        pr_err("RELM: linux_loader: kernel load failed: %d\n", ret);
+        pr_err("RELM: x86 boot: kernel load failed: %d\n", ret);
         return ret;
     }
 
     ret = relm_initrd_load(vm, dev, &initrd_size);
-    if(ret)
+    if (ret) 
     {
-        pr_err("RELM: linux_loader: initrd load failed: %d\n", ret);
+        pr_err("RELM: x86 boot: initrd load failed: %d\n", ret);
         return ret;
     }
 
     ret = relm_cmdline_load(vm, cmdline);
-    if(ret)
-    {
-        pr_err("RELM: linux_loader: cmdline load failed: %d\n", ret);
+    if (ret) {
+        pr_err("RELM: x86 boot: cmdline load failed: %d\n", ret);
         return ret;
     }
 
     ret = relm_boot_params_build(vm, &hdr, initrd_size);
-    if(ret)
-    {
-        pr_err("RELM: linux_loader: boot_params build failed: %d\n", ret);
+    if (ret) {
+        pr_err("RELM: x86 boot: boot_params build failed: %d\n", ret);
+        return ret;
+    }
+
+    ret = relm_install_daig_idt_gdt(vm);
+    if (ret) {
+        pr_err("RELM: x86 boot: GDT/IDT install failed: %d\n", ret);
         return ret;
     }
 
     vm->arch.kernel_entry_gpa = entry_gpa;
 
-    pr_info("RELM: linux_loader: setup complete\n");
-    pr_info("RELM:   kernel entry (startup_64) GPA = 0x%llx\n", entry_gpa);
-    pr_info("RELM:   boot_params (zero page)  GPA = 0x%llx\n",
+    pr_info("RELM: x86 boot: setup complete\n");
+    pr_info("RELM: x86 boot:   startup_64 GPA  = 0x%llx\n", entry_gpa);
+    pr_info("RELM: x86 boot:   boot_params GPA = 0x%llx\n",
             (unsigned long long)vm->arch.boot_params_gpa);
-    pr_info("RELM:   guest will enter directly in 64-bit long mode\n");
 
     return 0;
+}
+
+void relm_boot_info(const struct relm_vm *vm)
+{
+    if (!vm) return;
+
+    pr_info("RELM: x86 boot summary:\n");
+    pr_info("RELM:   kernel_entry_gpa (startup_64) = 0x%llx\n",
+            vm->arch.kernel_entry_gpa);
+    pr_info("RELM:   boot_params_gpa  (zero page)  = 0x%llx\n",
+            vm->arch.boot_params_gpa);
+    pr_info("RELM:   guest enters in 64-bit long mode, "
+            "RSI = boot_params GPA\n");
 }
 
 uint64_t relm_linux_loader_entry_gpa(const struct relm_vm *vm)
@@ -575,3 +603,4 @@ _err_log:
     pr_err("RELM: linux_loader: GDT entry write failed: %d\n", ret);
     return ret;
 }
+

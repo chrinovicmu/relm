@@ -87,19 +87,12 @@ static int __init relm_module_init(void)
         ret = 0;
     }
 
-    /*load the linux guest kernel */ 
-    ret = relm_linux_loader_setup(my_vm, &relm_pdev->dev, NULL);
+    ret = relm_boot_load(my_vm, &relm_pdev->dev, NULL);
     if (ret) {
-        pr_err("RELM: linux loader failed: %d\n"
-               "  Place a bzImage at /lib/firmware/%s\n"
-               "  (optional initrd at /lib/firmware/%s)\n",
-               ret,
-               RELM_KERNEL_FW_NAME,
-               RELM_INITRD_FW_NAME);
+        pr_err("RELM: boot load failed: %d\n", ret);
         goto _cleanup_vm;
     }
-    pr_info("RELM: linux loader complete "
-            "(kernel + boot_params in guest RAM)\n");
+    relm_boot_info(my_vm);  
 
     /*If IOMMU is active, mirroe every guest RAM pgae into 
     * IOMMU domain so that passthrough devices can DMA to 
