@@ -63,7 +63,7 @@ struct relm_vm
 
     int max_vcpus;
     int online_vcpus;
-    struct vcpu *vcpus[RELM_MAX_VCPUS];
+    struct vcpu **vcpus;
 
     struct relm_firmware_data *fw_data;  
 
@@ -110,7 +110,7 @@ struct relm_mem_ops
                    uint64_t hpa, uint64_t flags); 
     
     /*unmap single guest page*/ 
-    void (*unmap)(struct relm_vm *vm, uint64_t gpa); 
+    void (*unmap_page)(struct relm_vm *vm, uint64_t gpa); 
 
     /*build guest visiable page tbals inside guest RAM*/ 
     int (*create_guest_page_tables)(struct relm_vm *vm); 
@@ -128,14 +128,11 @@ void relm_destroy_vm(struct relm_vm *vm);
 int relm_vm_add_vcpu(struct relm_vm *vm, int vcpu_id); 
 struct vcpu *relm_vm_get_vcpu(struct relm_vm *vm, uint16_t vpid); 
 
-int relm_run_vcpu(struct relm_vm *vm, uint64_t vpid);
-int relm_stop_vcpu(struct relm_vm *vm, uint16_t vpid);
 int relm_run_vm(struct relm_vm *vm);
 int relm_stop_vm(struct relm_vm *vm);
 
 int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_start); 
 int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa, uint64_t hpa, uint64_t size); 
-void relm_vm_free_guest_memory(struct relm_vm *vm); 
 void relm_vm_free_guest_mem(struct relm_vm *vm);
 
 int relm_vm_copy_to_guest(struct relm_vm *vm, uint64_t gpa, const void *data, size_t size);

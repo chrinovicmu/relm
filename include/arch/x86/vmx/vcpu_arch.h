@@ -8,7 +8,7 @@
 
 #include <include/arch/x86/vmx/vmcs.h>
 #include <include/arch/x86/vmx/vmx.h>
-#include <include/arch/x86/apic.h>
+#include <include/arch/x86/vmx/apic.h>
 
 /* Maximum number of MSRs managed in the VM-entry/exit MSR load/store lists. */
 #define RELM_MAX_MANAGED_MSRS   16

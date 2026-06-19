@@ -41,7 +41,7 @@ struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vpid,
     struct vcpu *vcpu; 
     int ret; 
 
-    if(!vm || !arch || !arch_ops->vcpu_alloc)
+    if(!vm || !arch_ops || !arch_ops->vcpu_alloc)
         return ERR_PTR(-EINVAL); 
 
     /*generic allocation*/ 
@@ -60,7 +60,7 @@ struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vpid,
 
     /*allocate host kernel stack for vCPU thread to execute on*/ 
     vcpu->host_stack = (void*)__get_free_pages(GFP_KERNEL | __GFP_ZERO, 
-                                                HOST_STACK_ORDER); 
+                                               RELM_HOST_STACK_ORDER); 
 
     if (!vcpu->host_stack) {
         pr_err("RELM: VCPU%d: failed to allocate host stack\n", vpid);
@@ -198,7 +198,7 @@ void relm_vcpu_unpin_and_stop(struct vcpu *vcpu)
  * arch cleanup 
  * */ 
 
-static int relm_vpcu_loop(void *data)
+static int relm_vcpu_loop(void *data)
 {
     struct vcpu *vcpu = (struct vcpu*)data; 
     int ret; 
@@ -313,7 +313,7 @@ _out_clear_vcpu:
     pr_info("RELM: VCPU%d: thread exiting on CPU%d\n",
             vcpu->vpid, smp_processor_id());
 
-    return ret
+    return ret; 
 }
 
 
@@ -354,7 +354,7 @@ int relm_vcpu_run(struct vcpu *vcpu)
         vcpu, 
         "relm_vm%d_vcpu%u", 
         vcpu->vm->vm_id, 
-        (unsigned int)vcpu->vpid; 
+        (unsigned int)vcpu->vpid 
     ); 
 
     if (IS_ERR(vcpu->host_task)) 

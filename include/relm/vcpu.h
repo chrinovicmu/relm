@@ -4,6 +4,9 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
+#include <relm_arch/vcpu_arch.h>
+
+#define RELM_HOST_STACK_ORDER   2
 
 struct relm_vm;
 struct vcpu_arch_ops; 
@@ -33,7 +36,7 @@ struct vcpu_stats {
 struct vcpu 
 {
     struct relm_vm *vm; 
-    uint16 vpid;    /*virtual processor id*/ 
+    uint16_t vpid;    /*virtual processor id*/ 
     int target_cpu_id; 
 
     enum vcpu_state state; 
@@ -44,7 +47,7 @@ struct vcpu
     void *host_stack; 
 
     spinlock_t lock; 
-    wait_queue_head_t; 
+    wait_queue_head_t wq; 
 
     const struct vcpu_arch_ops *ops; 
 
@@ -97,20 +100,23 @@ struct vcpu_arch_ops {
     int  (*write_msr)(struct vcpu *vcpu, uint32_t msr, uint64_t val);
     void (*dump_regs)(struct vcpu *vcpu);
 };
-struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vcpu_id);
+
+struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vcpu_id, 
+                              const struct vcpu_arch_ops *arch_ops);
 void relm_vcpu_destroy(struct vcpu *vcpu);
+
 int relm_vcpu_run(struct vcpu *vcpu);
 int relm_vcpu_stop(struct vcpu *vcpu);
+
 struct vcpu *relm_get_current_vcpu(void);
 
-#endif /* RELM_VCPU_H *
+int  relm_vcpu_pin_to_cpu(struct vcpu *vcpu, int target_cpu_id);
+void relm_vcpu_unpin_and_stop(struct vcpu *vcpu);
+
+#endif /* RELM_VCPU_H */ 
 
 
 
 
 
 
-
-
-
-}

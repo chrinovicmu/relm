@@ -8,7 +8,6 @@
 #include <include/relm/vcpu.h>
 #include <utils/utils.h>
 
-DEFINE_PER_CPU(struct vcpu *, current_vcpu);
 
 static inline void relm_set_current_vcpu(struct vcpu *vcpu)
 {
@@ -20,17 +19,12 @@ struct vcpu *relm_get_current_vcpu(void)
     return this_cpu_read(current_vcpu);
 }
 
-/*per-CPU varaible holding the currently executing vcpu.
- * allows handle_vmesit to find VCPU structure wuthout passing
- * it as a parameter*/
-extern int relm_vmentry_asm(struct guest_regs *regs, int launched);
-extern void relm_vmexit_handler(void);
-
 static const char * const vm_state_names[] = {
-    [VM_STATE_CREATED]    = "CREATED",
-    [VM_STATE_RUNNING]    = "RUNNING",
-    [VM_STATE_SUSPENDED]  = "SUSPENDED",
-    [VM_STATE_STOPPED]    = "STOPPED",
+    [VM_STATE_CREATED]      = "CREATED",
+    [VM_STATE_INITIALIZED]  = "INITIALIZED", 
+    [VM_STATE_RUNNING]      = "RUNNING",
+    [VM_STATE_SUSPENDED]    = "SUSPENDED",
+    [VM_STATE_STOPPED]      = "STOPPED",
 };
 
 static inline const char *vm_state_to_string(enum vm_state state)
@@ -76,6 +70,7 @@ static void relm_op_dump_regs(struct relm_vm *vm, int vpid)
 
 static const struct relm_vm_operations relm_generic_vm_ops = {
     .get_uptime = relm_op_get_uptime,
+    .get_cpu_utilization = relm_op_get_cpu_utilization; 
     .print_stats = relm_op_print_stats,
     .dump_regs = relm_op_dump_regs,
 };
@@ -86,12 +81,12 @@ static void relm_vm_ops_merg(struct relm_vm *vm,
                              const struct relm_vm_operations *arch_ops)
 {
     struct relm_vm_operations *merged = &vm->ops_storage;
-    *merged = &arch_ops; 
+    *merged = *arch_ops; 
 
     /*patch generic defaults for any NULL introspection slots*/
     if(!merged->get_uptime)
         merged->get_uptime = relm_generic_vm_ops.get_uptime; 
-    if(!merged>get_cpu_utilization)
+    if(!merged->get_cpu_utilization)
         merged->get_cpu_utilization = relm_generic_vm_ops->get_cpu_utilization; 
     if (!merged->print_stats)
         merged->print_stats = relm_generic_vm_ops.print_stats;
@@ -238,7 +233,7 @@ int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa,
         current_gpa = gpa + (i * PAGE_SIZE); 
         current_hpa = hpa + (i * PAGE_SIZE);
 
-        ret = vm->mem_ops->map_pagee(vm, current_gpa, current_hpa, mmio_flags); 
+        ret = vm->mem_ops->map_page(vm, current_gpa, current_hpa, mmio_flags); 
         if(ret < 0){
             pr_err("RELM: Failed to map MMIO page GPA 0x%llx -> HPA 0x%llx (%d)\n", 
                    current_gpa, current_hpa, ret); 
@@ -249,6 +244,8 @@ int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa,
     region->next = vm->mem_regions; 
     vm->mem_regions = region; 
     pr_info("RELM: MMIO region mapped successfully\n"); 
+    
+    return 0; 
 
 _cleanup:
     while(i--)
@@ -340,11 +337,9 @@ struct relm_vm * relm_create_vm(int vm_id, const char *vm_name,
         if(ret < 0)
         {
             pr_err("Failed to create map Guest page tables\n"); 
-            goto _out_free_ept; 
+            goto _out_free_mmu; 
             return NULL; 
         }
-        PDEBUG("RELM: Guest PML4_GPA=0x%llu\n",
-               vm->arch.pml4_gpa); 
     }
 
     vm->vcpus = kcalloc(vm->max_vcpus, sizeof(struct vcpu*), GFP_KERNEL);
@@ -363,12 +358,9 @@ struct relm_vm * relm_create_vm(int vm_id, const char *vm_name,
 
 _out_free_memory:
     relm_vm_free_guest_mem(vm);
-_out_free_ept:
-    if(vm->arch.ept)
-    {
-        relm_ept_context_destroy(vm->arch.ept);
-        vm->arch.ept = NULL;
-    }
+_out_free_mmu:
+    if(vm->mem_ops && vm->mem_ops->destroy)
+        vm->mem_ops->destroy(vm); 
 _out_free_vm:
     kfree(vm);
     return NULL;
@@ -393,7 +385,7 @@ void relm_destroy_vm(struct relm_vm *vm)
                 /*if VCPU has runnning thread, stop it first.*/
                 if(vm->vcpus[i]->host_task)
                     kthread_stop(vm->vcpus[i]->host_task);
-                relm_free_vcpu(vm->vcpus[i]);
+                relm_vcpu_destroy(vm->vcpus[i]);
                 vm->vcpus[i] = NULL;
             }
         }
@@ -402,11 +394,8 @@ void relm_destroy_vm(struct relm_vm *vm)
 
     relm_vm_free_guest_mem(vm);
 
-    if(vm->arch.ept)
-    {
-        relm_ept_context_destroy(vm->arch.ept);
-        vm->arch.ept = NULL;
-    }
+    if(vm->mem_ops && vm->mem_ops->destroy)
+        vm->mem_ops->destroy(vm);
 
     kfree(vm);
     pr_info("RELM: VM destruction complete.\n");
@@ -823,7 +812,7 @@ int relm_run_vm(struct relm_vm *vm)
         pr_info("RELM: Launching VCPU VPID=%u (target CPU: %d)\n",
                 vcpu->vpid, vcpu->target_cpu_id);
 
-        ret = relm_run_vcpu(vm, vcpu->vpid); 
+        ret = relm_run_vcpu(vm); 
         if(ret < 0)
         {
             pr_err("RELM: Failed to start VCPU VPID=%u: %d\n", 
@@ -863,7 +852,7 @@ _stop_all_vcpus:
         }
 
         pr_info("RELM: Stopping VCPU VPID=%u\n", vcpu->vpid);
-        relm_stop_vcpu(vm, vcpu->vpid);
+        relm_stop_vcpu(vcpu);
     }
 
     spin_lock(&vm->lock);
@@ -927,3 +916,4 @@ int relm_stop_vm(struct relm_vm *vm)
 
     return 0;
 }
+

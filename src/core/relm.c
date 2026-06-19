@@ -13,7 +13,7 @@
 
 #include <include/relm/vm.h>       
 #include <include/relm/vcpu.h>     
-#include <include/iommu.h>         
+#include <include/relm/iommu.h>         
 #include <include/boot/linux_loader.h>  
 
 #include <relm_arch/arch.h>
