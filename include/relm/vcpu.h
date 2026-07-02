@@ -54,6 +54,8 @@ struct vcpu
     struct vcpu_stats stats; 
 
     struct vcpu_arch arch ; 
+
+    uint32_t pending_interrupts[8]; 
 };
 
 struct vcpu_arch_ops {

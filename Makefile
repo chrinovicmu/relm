@@ -71,7 +71,7 @@ BOOT_OBJS := \
     src/firmware/seabios.o
 
 MODULE_OBJS := \
-    src/module.o
+    src/core/relm.o 
 
 TRACE_OBJS := \
     src/tracing/ebpf/relm_trace.o
