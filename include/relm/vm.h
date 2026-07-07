@@ -5,6 +5,7 @@
 #include <linux/types.h>
 
 #include <relm_arch/vm_arch.h>
+#include <include/virtio/mmio.h>
 
 struct vcpu; 
 struct relm_vm_operations; 
@@ -27,6 +28,22 @@ struct guest_mem_region
     uint64_t flags;
     struct guest_mem_region *next; 
 }; 
+
+/* All VM's memory related structs and info*/ 
+struct relm_vm_memory
+{
+    /*linked list of backed, guest-RAM regions , eahc entry 
+     * discribes a contigous ranfe of real struct pages mapped into 
+     * the guest's phsyical address space */  
+    struct guest_mem_region *mem_regions; 
+    uint64_t total_guest_ram; 
+
+    /*GPA ranges reserved for MMIO purposes
+     * left unmapped so that any access traps a VMEXIT*/  
+    struct relm_mmio_region mmio_regions[RELM_MAX_MMIO_REGIONS]; 
+    unsigned int mmio_region_count; 
+}; 
+
 /* Memory region flags. */
 #define RELM_MEM_F_READ    BIT(0)
 #define RELM_MEM_F_WRITE   BIT(1)
@@ -52,13 +69,13 @@ struct relm_vm_stats
 
 }; 
 
+/*A single VM instance */ 
 struct relm_vm
 {
     int vm_id;
     char vm_name[RELM_VM_NAME_LEN];
 
-    struct guest_mem_region *mem_regions; 
-    uint64_t total_guest_ram; 
+    struct relm_vm_memory memory; 
     const struct relm_mem_ops *mem_ops; 
 
     int max_vcpus;

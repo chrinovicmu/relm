@@ -41,7 +41,7 @@ static int relm_e820_add(struct relm_e820_map *map,
 
 int relm_e820_build(const struct relm_vm *vm, struct relm_e820_map *map)
 {
-    uint64_t total_ram = vm->total_guest_ram;
+    uint64_t total_ram = vm->memory.total_guest_ram;
     int ret;
  
     /* Validate minimum RAM size: need at least 1 MB for the VGA hole

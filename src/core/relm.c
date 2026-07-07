@@ -66,7 +66,7 @@ static int __init relm_module_init(void)
     }
     pr_info("RELM: VM '%s' created (%llu MB guest RAM)\n",
             my_vm->vm_name,
-            my_vm->total_guest_ram / (1024ULL * 1024ULL));
+            my_vm->memory.total_guest_ram / (1024ULL * 1024ULL));
 
     /* Let the arch layer log its own state (EPTP on x86, VTTBR on arm64)*/
     relm_arch_vm_ready(my_vm);

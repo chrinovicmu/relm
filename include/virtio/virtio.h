@@ -29,59 +29,6 @@
 #define RELM_VIRTIO_VENDOR_ID       0x52454C4DU  /* "RELM" in ASCII */ 
 
 
-#define VIRTIO_MMIO_MAGIC_VALUE_OFF         0x000
-#define VIRTIO_MMIO_VERSION_OFF             0x004
-#define VIRTIO_MMIO_DEVICE_ID_OFF           0x008
-#define VIRTIO_MMIO_VENDOR_ID_OFF           0x00c
-
-/*feature negotiation */ 
-#define VIRTIO_MMIO_DEVICE_FEATURES_OFF     0x010 
-#define VIRTIO_MMIO_DEVICE_FEATURES_SEL_OFF 0x014 
-#define VIRTIO_MMIO_DRIVER_FEATURES_OFF     0x020
-#define VIRTIO_MMIO_DRIVER_FEATURES_SEL_OFF 0x024 
-
-/*virtqueue configuration */ 
-#define VIRTIO_MMIO_QUEUE_SEL_OFF           0x030 
-#define VIRTIO_MMIO_QUEUE_NUM_MAX_OFF       0x034 
-#define VIRTIO_MMIO_QUEUE_NUM_OFF           0x038 
-#define VIRTIO_MMIO_QUEUE_READY_OFF         0x044 
-
-/*notifications and interrupt*/ 
-#define VIRTIO_MMIO_QUEUE_NOTIFY_OFF        0x050 
-#define VIRTIO_MMIO_INTERRUPT_STATUS_OFF    0x060 
-#define VIRTIO_MMIO_INTERRUPT_ACK_OFF       0x064 
-
-/*device status */ 
-#define VIRTIO_MMIO_STATUS_OFF              0x070 
-
-/*virtqueue memory layout (64 bit pointers) */ 
-
-/*physical address of descriptor area*/ 
-#define VIRTIO_MMIO_QUEUE_DESC_LOW_OFF      0x080 
-#define VIRTIO_MMIO_QUEUE_DESC_HIGH_OFF     0x084 
-
-/*64 bit address of avail ring */ 
-#define VIRTIO_MMIO_QUEUE_DRIVER_LOW_OFF    0x090 
-#define VIRTIO_MMIO_QUEUE_DRIVER_HIGH_OFF   0x094 
-
-/*64 bit address of used ring */ 
-#define VIRTIO_MMIO_QUEUE_DEVICE_LOW_OFF    0x0a0 
-#define VIRTIO_MMIO_QUEUE_DEVICE_HIGH_OFF   0x0a4 
-
-#define VIRTIO_MMIO_CONFIG_GENERATION_OFF   0x0fc 
-
-/*device-specifc config space*/ 
-#define VIRTIO_MMIO_CONFIG_OFF              0x100 
-
-
-/*total size of the register block + config space. 
-* page aligned*/ 
-#define RELM_VIRTIO_MMIO_REGION             0x1000U 
-
-#define RELM_VIRTIO_MMIO_BASE_GPA           0xd0000000ULL
-
-#define RELM_VIRTIO_MMIO_IRQ   5
-
 /* Descriptor flags (struct vring_desc.flags). */
 #define VRING_DESC_F_NEXT               1  /* descriptor continues via 'next'       */
 #define VRING_DESC_F_WRITE              2  /* device-writable (host writes INTO it) */
@@ -165,9 +112,9 @@ struct relm_virtio_device
     uint8_t isr; 
     struct relm_virtqueue queues[RELM_VIRTIO_MAX_QUEUES]; 
     unsigned int queue_count; 
-
     const struct relm_virtio_device_ops *op; 
     char name[32]; 
+    spinlock_t reg_lock; 
 }; 
 
 struct relm_virtio_device_ops{
@@ -194,6 +141,15 @@ struct relm_virtio_device_ops{
                            uint8_t new_status); 
 }; 
 
+
+typedef int (*relm_virtio_chain_handler_fn)(struct relm_virtio_device *dev, 
+                                            unsigned int queue_index, 
+                                            uint16_t head_idx, 
+                                            uint32_t *bytes_written_out); 
+
+int relm_virtio_process_queue(struct relm_virtio_device *dev, 
+                              unsigned int queue_index, 
+                              relm_virtio_chain_handler_fn handler); 
 
 static inline uint64_t vring_avail_ring_gpa(uint64_t avail_base_gpa)
 {

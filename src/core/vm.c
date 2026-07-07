@@ -166,9 +166,9 @@ int relm_vm_allocate_guest_ram(struct relm_vm *vm, uint64_t size, uint64_t gpa_s
         }
     }
 
-    region->next = vm->mem_regions;
-    vm->mem_regions = region;
-    vm->total_guest_ram += size;
+    region->next = vm->memory.mem_regions;
+    vm->memory.mem_regions = region;
+    vm->memory.total_guest_ram += size;
 
     pr_info("RELM: Successfully allocated and mapped guest RAM\n");
    
@@ -241,8 +241,8 @@ int relm_vm_map_mmio_region(struct relm_vm *vm, uint64_t gpa,
         }
     }
 
-    region->next = vm->mem_regions; 
-    vm->mem_regions = region; 
+    region->next = vm->memory.mem_regions; 
+    vm->memory.mem_regions = region; 
     pr_info("RELM: MMIO region mapped successfully\n"); 
     
     return 0; 
@@ -270,7 +270,7 @@ void relm_vm_free_guest_mem(struct relm_vm *vm)
     if(!vm)
         return;
 
-    region = vm->mem_regions;
+    region = vm->memory.mem_regions;
     while(region)
     {
         next = region->next;
@@ -287,8 +287,8 @@ void relm_vm_free_guest_mem(struct relm_vm *vm)
         region = next;
     }
 
-    vm->mem_regions = NULL;
-    vm->total_guest_ram = 0;
+    vm->memory.mem_regions = NULL;
+    vm->memory.total_guest_ram = 0;
 }
 
 struct relm_vm * relm_create_vm(int vm_id, const char *vm_name,
@@ -433,7 +433,7 @@ int relm_vm_copy_to_guest(struct relm_vm *vm, uint64_t gpa,
         if(!region || current_gpa < region->gpa_start || 
             current_gpa >= (region->gpa_start + region->size))
         {
-            region = vm->mem_regions; 
+            region = vm->memory.mem_regions; 
             while(region)
             {
                 /*check if current_gpa falls into this region's address space range */ 
@@ -550,7 +550,7 @@ int relm_vm_copy_from_guest(struct relm_vm *vm, const uint64_t gpa,
         if(!region || current_gpa < region->gpa_start || 
             current_gpa >= (region->gpa_start + region->size)){
         
-            region = vm->mem_regions; 
+            region = vm->memory.mem_regions; 
             while(region)
             {
             if(current_gpa >= region->gpa_start &&
@@ -637,7 +637,7 @@ int relm_vm_zero_guest_memory(struct relm_vm *vm, uint64_t gpa, size_t size)
         if(!region || current_gpa < region->gpa_start || 
             current_gpa >= (region->gpa_start + region->size))
         {
-            region = vm->mem_regions;
+            region = vm->memory.mem_regions;
             while (region) 
             {
                 if (current_gpa >= region->gpa_start &&
