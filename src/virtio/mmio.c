@@ -148,5 +148,12 @@ int relm_vm_mmio_region_at(struct relm_vm *vm, unsigned int index,
     return 0;
 }
  
- 
+
+
+int relm_virtio_mmio_register_device(struct relm_virtio_device *dev, 
+                                     uint64_t base_gpa, 
+                                     unsigned int irq)
+{
+
+}
 

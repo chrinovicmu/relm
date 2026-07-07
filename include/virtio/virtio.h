@@ -4,6 +4,7 @@
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <linux/mm.h>
+#include <include/virtio/mmio.h> 
 
 #define VIRTIO_MMIO_VALUE           0x74726976U
 #define VIRTIO_MMIO_VERSION_MODERN  2U /*modern */ 
@@ -46,6 +47,8 @@
  * constant. Devices with fewer queues simply leave the higher indices
  * unconfigured (ready == false). */
 #define RELM_VIRTIO_MAX_QUEUES 8
+
+#define RELM_VIRTIO_MMIO_MAX_DEVICES 4 
 
 struct relm_vm; 
 struct relm_virtio_device; 
