@@ -148,12 +148,10 @@ int relm_vm_mmio_region_at(struct relm_vm *vm, unsigned int index,
     return 0;
 }
  
+struct mmio_selector_state{
+    uint32_t device_features_sel; 
+    uint32_t driver_features_sel; 
+    uint32_t queue_sel; 
+}; 
 
-
-int relm_virtio_mmio_register_device(struct relm_virtio_device *dev, 
-                                     uint64_t base_gpa, 
-                                     unsigned int irq)
-{
-
-}
-
+static struct mmio_selector_state g_selector_state

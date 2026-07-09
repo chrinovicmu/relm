@@ -186,4 +186,4 @@ static inline uint64_t vring_desc_table_total_size(uint16_t queue_size)
 
 
 
-#endif 
+#endif
