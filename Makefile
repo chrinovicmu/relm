@@ -30,8 +30,10 @@ endif
 
 ifeq ($(SUBTARGET),)
     ARCH_INCLUDE_DIR := $(src)/include/arch/$(ARCH)
+    ARCH_SRC_DIR     := src/arch/$(ARCH)
 else
     ARCH_INCLUDE_DIR := $(src)/include/arch/$(ARCH)/$(SUBTARGET)
+    ARCH_SRC_DIR     := src/arch/$(ARCH)/$(SUBTARGET)
 endif
 
 ifeq ($(SUBTARGET),)
@@ -40,16 +42,14 @@ else
     ARCH_SHARED_DIR := $(src)/include/arch/$(ARCH)
 endif
 
-ifeq ($(SUBTARGET),)
-    ARCH_SRC_DIR := src/arch/$(ARCH)
-else
-    ARCH_SRC_DIR := src/arch/$(ARCH)/$(SUBTARGET)
+ARCH_C_SRCS  := $(wildcard $(src)/$(ARCH_SRC_DIR)/*.c)
+ARCH_S_SRCS  := $(wildcard $(src)/$(ARCH_SRC_DIR)/*.S)
+
+ifeq ($(ARCH),x86)
+    ARCH_C_SRCS += $(wildcard $(src)/src/arch/x86/decoder/*.c)
 endif
 
-ARCH_C_SRCS  := $(wildcard $(src)/$(ARCH_SRC_DIR)/*.c)
 ARCH_C_OBJS  := $(patsubst $(src)/%.c, %.o, $(ARCH_C_SRCS))
-
-ARCH_S_SRCS  := $(wildcard $(src)/$(ARCH_SRC_DIR)/*.S)
 ARCH_S_OBJS  := $(patsubst $(src)/%.S, %.o, $(ARCH_S_SRCS))
 ARCH_OBJS    := $(ARCH_C_OBJS) $(ARCH_S_OBJS)
 
@@ -70,19 +70,17 @@ BOOT_OBJS := \
     src/firmware/fw_cfg.o   \
     src/firmware/seabios.o
 
-MODULE_OBJS := \
-    src/core/relm.o 
-
-TRACE_OBJS := \
-    src/tracing/ebpf/relm_trace.o
+VIRTIO_OBJS := \
+    src/virtio/mmio.o   \
+    src/virtio/virtio.o
 
 GUEST_OBJS := \
     guest/guest_kernel_embed.o
 
 $(MODULE_NAME)-y := \
-    $(MODULE_OBJS)  \
     $(CORE_OBJS)    \
     $(BOOT_OBJS)    \
+    $(VIRTIO_OBJS)  \
     $(ARCH_OBJS)    \
     $(GUEST_OBJS)
 
@@ -91,9 +89,14 @@ SUBTARGET_UPPER := $(shell echo $(SUBTARGET) | tr a-z A-Z)
 
 ccflags-y := \
     -I$(src)                    \
+    -I$(src)/include            \
     -I$(src)/utils              \
     -I$(ARCH_INCLUDE_DIR)       \
     -DRELM_ARCH_$(ARCH_UPPER)
+
+ifeq ($(ARCH),x86)
+    ccflags-y += -I$(src)/include/arch/x86/decoder
+endif
 
 ifneq ($(ARCH_SHARED_DIR),)
     ccflags-y += -I$(ARCH_SHARED_DIR)
@@ -118,13 +121,13 @@ endif
 all: modules
 
 guest/guest_kernel.bin: guest/guest_kernel.S
-	@echo "  AS       $< → guest/guest_kernel.o"
+	@echo "  AS        $< → guest/guest_kernel.o"
 	$(AS) --64 -o guest/guest_kernel.o $<
 
-	@echo "  OBJCOPY  guest/guest_kernel.o → $@"
+	@echo "  OBJCOPY   guest/guest_kernel.o → $@"
 	$(OBJCOPY) --output-target binary guest/guest_kernel.o $@
 
-	@printf "  GUEST    %d bytes → $@\n" "$$(wc -c < $@)"
+	@printf "  GUEST     %d bytes → $@\n" "$$(wc -c < $@)"
 
 modules: guest/guest_kernel.bin
 	@echo ""
@@ -134,10 +137,7 @@ modules: guest/guest_kernel.bin
 	@echo "    ARCH_DIR  = $(ARCH_INCLUDE_DIR)"
 	@echo "    ARCH_SRCS = $(ARCH_OBJS)"
 	@echo ""
-	$(MAKE) -C $(KDIR) M=$(PWD) \
-	    ARCH=$(ARCH)             \
-	    SUBTARGET=$(SUBTARGET)   \
-	    modules
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean

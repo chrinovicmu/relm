@@ -4,6 +4,8 @@
 #include <linux/types.h>
 #include <include/vmx.h>
 #include <include/vm.h> 
+#include <include/virtio/virtio.h> 
+#include <include/virtio/mmio.h> 
 
 #define EPT_POINTER             0x0000201A
 
@@ -146,7 +148,8 @@ int relm_ept_get_mapping(struct ept_context *ept, uint64_t gpa, uint64_t *hpa);
 int relm_ept_set_memory_type(struct ept_context *ept, uint64_t gpa, uint8_t memtype); 
 
 int relm_ept_handle_violation(struct vcpu *vcpu, uint64_t gpa, uint64_t exit_qualification); 
-
+int relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu, 
+                                          uint64_t fault_gpa)
 /*invalidate all TLB entries for EPT */ 
 void relm_ept_invalidate_context(struct ept_context *ept); 
 

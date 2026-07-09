@@ -9,10 +9,12 @@
 
 #include <include/vmx.h>
 #include <include/vm.h>
-#include <include/ept.h>
+#include <include/ept.h> 
 #include <include/vmx_ops.h>
 #include <include/vmexit.h>
 #include <include/vmcs_state.h>
+#include <include/virtio/virtio.h> 
+#include <include/virtio/mmio.h> 
 #include <utils/utils.h>
 
 
@@ -197,6 +199,7 @@ int relm_handle_ept_violation(struct relm_vm *vm)
     return -EFAULT; 
 }
 
+bool relm_virtio_mmio_handle
 int relm_vcpu_handle_ept_misconfig(struct relm_vm *vm)
 {
     uint64_t gpa; 
@@ -690,6 +693,7 @@ void relm_ept_invalidate_context(struct ept_context *ept)
 
     PDEBUG("RELM: Invalidated EPT context (EPTP=0x%llx)\n", ept->eptp);
 }
+
 
 void relm_ept_dump_tables(struct ept_context *ept)
 {

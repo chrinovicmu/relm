@@ -11,6 +11,7 @@
 #include <include/vmexit.h>
 #include <include/apic.h>
 #include <include/ept.h>
+#include <include/relm/decoder.h>
 #include <utils/utils.h>
 
 /*EPT permissons flags for the APIC-access page at GPA 0xFEE00000. 
@@ -997,48 +998,51 @@ int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
     return 0;
 }
 
-
-/*this is the entry point called by handle_vmexit() in vmexit.c 
-* when exit reason == EXIT_REASON_APIC_ACCESS (44)
-* for write (type 1), we still need to know what value was written. 
-* the hardware doesn't tell us this directly, it only tells usthe 
-* address and direction. the value is in one of the
-* guest's general-purpose registers. 
-* 
-* we assume the value is in RAX */ 
-
-
 int relm_apic_handle_access(struct vcpu *vcpu)
 {
     struct virt_apic *apic = &vcpu->arch.apic; 
 
-    uint64_t qual; 
-    uint32_t offset; 
-    uint32_t access_type; 
-    uint32_t value; 
-    uint64_t instr_len; 
-    uint64_t guest_rip; 
+    uint64_t qual, guest_rip, instr_len; 
+    uint32_t offset, access_type, value; 
+    uint8_t insn_buf[15];
+    struct relm_decoded_insn decoded;
     int ret; 
 
     qual = __vmread(VM_EXIT_QUALIFICATION); 
     offset = (uint32_t)(qual & APIC_ACCESS_OFFSET_MASK); 
-    access_type = (uint32_t)((qual & APIC_ACCESS_TYPE_MASK) 
-        >> APIC_ACCESS_TYPE_SHIFT); 
+    access_type = (uint32_t)((qual & APIC_ACCESS_TYPE_MASK) >> APIC_ACCESS_TYPE_SHIFT); 
 
     guest_rip = __vmread(GUEST_RIP); 
     instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN); 
 
     PDEBUG("RELM: APIC ACCESS: offset=0x%03x type=%u RIP=0x%llx len=%llu\n",
            offset, access_type, guest_rip, instr_len);
+
+    /* fetch the instruction bytes from guest memory before switching */
+    ret = relm_vm_copy_from_guest(vcpu->vm, guest_rip, insn_buf, (size_t)instr_len);
+    if (ret < 0) {
+        pr_err("RELM: APIC: Failed to copy instruction bytes from guest GPA=0x%llx\n", guest_rip);
+        return ret;
+    }
+    /* run the decoder to fill the 'decoded' struct */
+    if (relm_decode_instruction(insn_buf, instr_len, &decoded) < 0) {
+        pr_err("RELM: APIC: Instruction decoding failed at RIP=0x%llx\n", guest_rip);
+        return -EINVAL;
+    }
     
     switch(access_type)
     {
         case APIC_ACCESS_TYPE_LINEAR_WRITE:
-
         case APIC_ACCESS_TYPE_EVENT_DELIVERY:
             
-            value = (uint32_t)(vcpu->regs.rax & 0xFFFFFFFFULL);
-            ret   = relm_apic_write(vcpu, offset, value);
+            /* DYNAMIC RESOLUTION: Check if the guest used an immediate or a register */
+            if (decoded.is_immediate) {
+                value = (uint32_t)decoded.immediate;
+            } else {
+                value = (uint32_t)vcpu_read_register(vcpu, decoded.src_reg); /* Resolves RCX, RDX, etc. */
+            }
+
+            ret = relm_apic_write(vcpu, offset, value);
             if(ret < 0)
                 pr_warn("RELM: APIC: write to invalid offset 0x%03x "
                         "val=0x%08x at RIP=0x%llx\n",
@@ -1048,42 +1052,33 @@ int relm_apic_handle_access(struct vcpu *vcpu)
         case APIC_ACCESS_TYPE_LINEAR_READ:
             
             ret = relm_apic_read(vcpu, offset, &value);
-            if(ret < 0)
-            {
-                pr_warn("RELM: APIC: read from invalid offset 0x%03x "
-                        "at RIP=0x%llx\n", offset, guest_rip);
-                value = 0;  /* return 0 for unknown registers rather than crashing */
+            if(ret < 0) {
+                pr_warn("RELM: APIC: read from invalid offset 0x%03x at RIP=0x%llx\n", offset, guest_rip);
+                value = 0; 
             }
 
-            /*inject read into guest rax*/ 
-            vcpu->regs.rax = (unsigned long)(value & 0xFFFFFFFFUL);
+            /* DYNAMIC INJECTION: Inject read value into whichever destination register the guest used */
+            vcpu_write_register(vcpu, decoded.dst_reg, (uint64_t)value);
             break;
 
         case APIC_ACCESS_TYPE_LINEAR_FETCH:
-
-            /*invalid */ 
+            /* Invalid hardware condition */ 
             pr_err("RELM: APIC: INSTRUCTION FETCH at APIC offset=0x%03x "
-                   "RIP=0x%llx — guest instruction pointer in APIC space! "
-                   "This indicates a fatal guest error.\n",
+                   "RIP=0x%llx — guest instruction pointer in APIC space!\n",
                    offset, guest_rip);
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0;  /* return 0 tells relm_vcpu_loop to break */
+            return 0; 
 
         default:
-         
-            PDEBUG("RELM: APIC: event-delivery access type=%u offset=0x%03x\n",
-                   access_type, offset);
+            PDEBUG("RELM: APIC: fallback access type=%u offset=0x%03x\n", access_type, offset);
             ret = relm_apic_read(vcpu, offset, &value);
-            if(ret == 0)
-                vcpu->regs.rax = (unsigned long)(value & 0xFFFFFFFFUL);
+            if(ret == 0) {
+                vcpu_write_register(vcpu, decoded.dst_reg, (uint64_t)value);
+            }
             break;
     }
 
     _vmwrite(GUEST_RIP, guest_rip + instr_len);
- 
-    PDEBUG("RELM: APIC: handled — RIP advanced 0x%llx → 0x%llx (instr_len=%llu)\n",
-           guest_rip, guest_rip + instr_len, instr_len);
-
-
     return 1; 
 }
+
