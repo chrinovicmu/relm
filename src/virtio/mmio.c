@@ -7,6 +7,10 @@
 #include <include/relm/vm.h>
 #include <include/virtio/virtio.h>
 #include <include/virtio/mmio.h>
+#include <include/arch/x86/apic.h> 
+#include <include/arch/x86/vmx/vm_arch.h> 
+#include <include/relm/decoder.h>
+#include <include/arch/x86/vmx/vcpu_arch.h> 
 #include <utils/utils.h>
 
 int relm_cm_reserve_mmio_region(struct relm_vm *vm, 
@@ -148,4 +152,101 @@ int relm_vm_mmio_region_at(struct relm_vm *vm, unsigned int index,
     return 0;
 }
  
+bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu, 
+                                           uint64_t fault_gpa)
+{
+    struct relm_virto_device *dev; 
+    uint8_t insn_buf[16];
+    struct relm_decoded_insn decoded;
+    uint64_t guest_rip; 
+    unsigned int offset; 
+    uint32_t value = 0; 
+    bool needs_irq = false; 
+    int n, ret; 
 
+    dev = find_device_for_gpa(fault_gpa); 
+    if(!dev)
+        return false; 
+
+    offset = (unsigned int)(fault_gpa - dev->mmio_base_gpa); 
+    guest_rip = vcpu->arch.regs.rip; 
+
+    n = relm_vm_copy_from_guest(vcpu->vm, guest_rip, 
+                                insn_buf, sizeof(insn_buf)); 
+
+    if (n < 0) {
+        pr_err("RELM: virtio-mmio: VCPU%d: failed to fetch instruction "
+               "bytes at RIP 0x%llx (n=%d)\n", vcpu->vpid, guest_rip, n);
+        return true;
+    }
+
+    ret = relm_decode_instruction(insn_bytes, n, &decoded);
+    if (ret < 0) {
+        pr_err("RELM: virtio-mmio: VCPU%d: failed to decode instruction "
+               "at RIP 0x%llx for device '%s' (ret=%d)\n",
+               vcpu->vpid, guest_rip, dev->name, ret);
+        return true;
+    }
+
+    /* GPR table */
+    uint64_t *gpr_table[16] = {
+        &vcpu->arch.regs.rax, &vcpu->arch.regs.rcx,
+        &vcpu->arch.regs.rdx, &vcpu->arch.regs.rbx,
+        &vcpu->arch.regs.rsp, &vcpu->arch.regs.rbp,
+        &vcpu->arch.regs.rsi, &vcpu->arch.regs.rdi,
+        &vcpu->arch.regs.r8,  &vcpu->arch.regs.r9,
+        &vcpu->arch.regs.r10, &vcpu->arch.regs.r11,
+        &vcpu->arch.regs.r12, &vcpu->arch.regs.r13,
+        &vcpu->arch.regs.r14, &vcpu->arch.regs.r15,
+    };
+
+    int gpr_index = decoded.is_write ? decoded.src_reg : decoded.dst_reg; 
+
+    if (gpr_index < 0 || gpr_index >= 16) {
+        pr_warn("RELM: virtio-mmio: VCPU%d: invalid GPR index %d\n",
+                vcpu->vpid, gpr_index);
+        return true;
+    }
+
+    if (decoded.is_write) 
+    {
+        uint64_t mask = (decoded.op_size == 4) ? 0xFFFFFFFFULL
+                      : (decoded.op_size == 2) ? 0xFFFFULL
+                      : 0xFFULL;
+
+        value = (uint32_t)(*gpr_table[gpr_index] & mask);
+
+        relm_virtio_mmio_register_access(dev, offset, true, &value, &needs_irq); 
+    }else{
+        relm_virtio_mmio_register_access(dev, offset, false, &value, &needs_irq);
+
+        /* write back with proper zero-extension */
+        if (decoded.op_size == 4) {
+            *gpr_table[gpr_index] = (uint64_t)value;
+        } else if (decoded.op_size == 2) {
+            *gpr_table[gpr_index] = (*gpr_table[gpr_index] & ~0xFFFFULL) | (value & 0xFFFFULL);
+        } else {
+            *gpr_table[gpr_index] = (*gpr_table[gpr_index] & ~0xFFULL) | (value & 0xFFULL);
+        }
+    }
+
+    1if (needs_irq) {
+        PDEBUG("RELM: virtio-mmio: VCPU%d: injecting IRQ %u for device '%s'\n",
+               vcpu->vpid, dev->irq, dev->name);
+        relm_apic_inject_irq(dev->vm, dev->irq);
+    }
+
+    /* advance RIP */
+    vcpu->arch.regs.rip = guest_rip + (unsigned int)ret;
+    CHECK_VMWRITE(GUEST_RIP, vcpu->arch.regs.rip);
+
+    PDEBUG("RELM: virtio-mmio: VCPU%d: '%s' %s offset 0x%x size=%u "
+           "gpr=%d value=0x%x, RIP 0x%llx -> 0x%llx\n",
+           vcpu->vpid, dev->name, decoded.is_write ? "write" : "read",
+           offset, decoded.op_size, gpr_index, value,
+           guest_rip, vcpu->arch.regs.rip);
+
+    return true;
+
+
+}

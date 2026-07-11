@@ -91,6 +91,8 @@ int relm_virtio_mmio_register_device(struct relm_virtio_device *dev,
 
 void relm_virtio_mmio_unregister_device(struct relm_virtio_device *dev);
 
+bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu, 
+                                           uint64_t fault_gpa); 
 
 
 

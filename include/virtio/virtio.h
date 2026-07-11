@@ -184,6 +184,11 @@ static inline uint64_t vring_desc_table_total_size(uint16_t queue_size)
     return (uint64_t)queue_size * sizeof(struct vring_desc);
 }
 
+void relm_virtio_mmio_register_access(struct relm_virtio_device *dev, 
+                                      unsigned int offset, 
+                                      bool is_write, 
+                                      uint32_t *value, 
+                                      bool *need_irq); 
 
 
 #endif

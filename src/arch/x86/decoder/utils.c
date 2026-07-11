@@ -4,7 +4,7 @@
 
 static inline int get_reg_index(struct insn *insn) {
     int reg = X86_MODRM_REG(insn->modrm.value);
-    /* if REX prefix is present and REX.R bit is set, it maps to extended registers (r8-r15) */
+    /* If REX prefix is present and REX.R bit is set, it maps to extended registers (r8-r15) */
     if (insn->rex_prefix.nbytes && (insn->rex_prefix.value & 0x04)) {
         reg += 8;
     }

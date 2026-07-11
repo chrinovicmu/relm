@@ -6,7 +6,7 @@
 struct relm_decoded_insn {
     bool is_write;
     unsigned int op_size; 
-
+    unsigned int access_size; //width of mmeory access 
     bool is_immediate; 
     uint64_t immediate;
 

@@ -7,6 +7,7 @@
 #include <include/vmx_ops.h>
 #include <include/vmexit.h>
 #include <include/vmcs_state.h>
+#include <include/virtio/mmio.h> 
 #include <include/firmware/fw_cfg.h> 
 #include <include/boot/linux_loader.h> 
 #include <utils/utils.h>
@@ -474,23 +475,44 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             bool ept_writable = exit_qualification & (1ULL << 4);
             bool ept_executable = exit_qualification & (1ULL << 5);
 
+            bool was_present = ept_readable || ept_writable || ept_executable;
+
+
+            if (!was_present) 
+            { 
+            /*if GPA is in the range the VM has reserved for MMIO */ 
+                if (relm_vm_gpa_is_mmio_region(vcpu->vm, gpa)) {
+
+                    if (relm_virtio_mmio_handle_ept_violation(vcpu, gpa)) {
+                        ret = 0;
+                        break;
+                    }
+
+                    /* Reserved range, but no registered device claimed it —
+                    * an initialization-ordering bug (e.g. the device was
+                    * never registered before the guest started probing). */
+                    pr_err("relm: [VPID=%u] EPT violation at GPA 0x%llx is a "
+                           "reserved MMIO range, but no registered device "
+                           "claimed it\n", vcpu->vpid, gpa);
+                    vcpu->state = VCPU_STATE_ERROR;
+                    ret = 0;
+                    break;
+                }
+            }
             pr_err("relm: [VPID=%u] EPT violation at GPA 0x%llx\n",
                    vcpu->vpid, gpa);
-
             pr_err(" Access: %s%s%s at RIP=0x%llx\n",
                    data_read ? "R" : "",
                    data_write ? "W" : "",
                    instr_fetch ? "X" : "",
                    guest_rip);
-
             pr_err(" EPT entry: %s%s%s\n",
                    ept_readable ? "R" : "-",
                    ept_writable ? "W" : "-",
-                   ept_executable ? "X" : "-");
-
+                  ept_executable ? "X" : "-");
             vcpu->state = VCPU_STATE_STOPPED;
             ret = 0;
-            break; 
+            break;
         }
         
         case EXIT_REASON_CR_ACCESS:
