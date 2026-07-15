@@ -5,7 +5,7 @@
 #include <linux/kern_levels.h>
 #include <asm/msr-index.h>
 #include <asm/processor-flags.h>
-#include <include/vmcs_state.h>
+#include <vmcs_state.h>
 
 /* VMX Basic Constants */
 #define X86_CR4_VMXE_BIT      13
@@ -56,12 +56,9 @@
 #define CR3_TARGET_VALUE3                     0x0000600E
 
 /* Guest State Fields */
-#define GUEST_CR0                             0x00006800
+/* GUEST_CR0/RSP/RIP/RFLAGS come from vmcs_state.h (included above). */
 #define GUEST_CR3                             0x00006802
 #define GUEST_CR4                             0x00006804
-#define GUEST_RIP                             0x0000681E
-#define GUEST_RSP                             0x0000681C
-#define GUEST_RFLAGS                          0x00006820
 
 /* =======================
  * Pin-Based VMCS Controls

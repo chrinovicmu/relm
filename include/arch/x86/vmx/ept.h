@@ -2,10 +2,16 @@
 #define EPT_H
 
 #include <linux/types.h>
-#include <include/vmx.h>
-#include <include/vm.h> 
-#include <include/virtio/virtio.h> 
-#include <include/virtio/mmio.h> 
+#include <linux/spinlock.h>
+
+/*
+ * ept.h is pulled in (via vm_arch.h) by the generic <relm/vm.h>. It previously
+ * #included <include/vmx.h> and <include/vm.h>, which (a) used broken paths and
+ * (b) created an include cycle vm.h -> vm_arch.h -> ept.h -> vm.h. All uses here
+ * are through pointers, so forward declarations are sufficient and cycle-free.
+ */
+struct relm_vm;
+struct vcpu;
 
 #define EPT_POINTER             0x0000201A
 
@@ -27,7 +33,7 @@
 
 /*memory type (bits 3-5) */ 
 #define EPT_MEMTYPE_UC          (0ULL << 3)
-#define EPT_MEMTYPE_WC          (1ULL << 4)
+#define EPT_MEMTYPE_WC          (1ULL << 3)   /* WC memtype = 1, i.e. bits[5:3]=001 */
 #define EPT_MEMTYPE_WT          (4ULL << 3)
 #define EPT_MEMTYPE_WP          (5ULL << 3)
 #define EPT_MEMTYPE_WB          (6ULL << 3)
@@ -136,7 +142,7 @@ int relm_ept_map_range(struct ept_context *ept, uint64_t gpa_start,
 
 int relm_ept_unmap_page(struct ept_context *ept, uint64_t gpa); 
 
-int relm_ept_create_guest_page_tables(struct relm_vm *vm)
+int relm_ept_create_guest_page_tables(struct relm_vm *vm);
 
 int relm_ept_translate_gpa(struct ept_context *ept,
                            uint64_t gpa, uint64_t *hpa_out);
@@ -147,10 +153,9 @@ int relm_ept_get_mapping(struct ept_context *ept, uint64_t gpa, uint64_t *hpa);
 /*change memory type for a mapped page */ 
 int relm_ept_set_memory_type(struct ept_context *ept, uint64_t gpa, uint8_t memtype); 
 
-int relm_ept_handle_violation(struct vcpu *vcpu, uint64_t gpa, uint64_t exit_qualification); 
-int relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu, 
-                                          uint64_t fault_gpa)
-/*invalidate all TLB entries for EPT */ 
+int relm_ept_handle_violation(struct vcpu *vcpu, uint64_t gpa, uint64_t exit_qualification);
+int relm_vcpu_handle_ept_misconfig(struct relm_vm *vm);
+/*invalidate all TLB entries for EPT */
 void relm_ept_invalidate_context(struct ept_context *ept); 
 
 void relm_ept_dump_tables(struct ept_context *ept); 

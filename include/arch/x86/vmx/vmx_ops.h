@@ -1,8 +1,8 @@
 #ifndef VMX_OPS_H 
 #define VMX_OPS_H
 
-#include <include/vmcs_state.h>
-#include <include/vmcs.h>
+#include <vmcs_state.h>
+#include <vmcs.h>
 
 static __always_inline void __attribute__((used)) ex_handler_rdmsr_unsafe(void)
 {
@@ -23,38 +23,51 @@ static inline void _cpuid(uint32_t leaf,
 
 static inline unsigned long long notrace __rdmsr1(unsigned int msr)
 {
-    /* low = eax = 0-31 
-     * high = edx = 32-63 */  
+    /* low = eax = 0-31
+     * high = edx = 32-63 */
 
-    unsigned int high;  
-    unsigned int low; 
+    /* Pre-zeroed with "+" constraints: when the RDMSR #GPs (MSR does not
+     * exist), the fixup resumes at 2: without writing eax/edx, so the
+     * function returns 0 instead of whatever garbage was in the registers. */
+    unsigned int high = 0;
+    unsigned int low = 0;
 
     __asm__ __volatile__ (
         "1: rdmsr\n"
         "2:\n"
-        /*switch to exception table temporarily */ 
+        /*switch to exception table temporarily */
         ".pushsection __ex_table, \"a\"\n"
         ".balign 4\n"
         ".long (1b - .), (2b - .), (ex_handler_rdmsr_unsafe - .)\n"
         ".popsection\n"
 
-        : "=a" (low),
-          "=d" (high) 
+        : "+a" (low),
+          "+d" (high)
         : "c" (msr)
         : "memory"
-    ); 
+    );
 
-    return ((unsigned long long)high << 32) | low; 
+    return ((unsigned long long)high << 32) | low;
 }
 
 static inline bool _cpu_has_vpid(void)
 {
-    uint32_t eax, ebx, ecx, edx;
+    /*
+     * VPID is a *secondary* processor-based VM-execution control, not a CPUID
+     * feature. Its availability is the allowed-1 setting reported in the high
+     * dword of IA32_VMX_PROCBASED_CTLS2 — but that MSR only exists when the
+     * primary controls allow activating secondary controls, so probe that
+     * first: RDMSRing it blind #GPs on parts without secondary controls.
+     * (The old code tested CPUID.1:ECX[5] — the VMX feature bit — and only
+     * worked by accident because both happen to be set on VMX-capable parts.)
+     */
+    uint64_t ctls = __rdmsr1(MSR_IA32_VMX_PROCBASED_CTLS);
 
-    /* CPUID leaf 1: ECX[5] == VPID */
-    _cpuid(1, &eax, &ebx, &ecx, &edx);
+    if (!((uint32_t)(ctls >> 32) & VMCS_PROC_ACTIVATE_SECONDARY))
+        return false;
 
-    return (ecx & (1u << 5)) != 0;
+    return ((uint32_t)(__rdmsr1(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32)
+            & VMCS_PROC2_VPID) != 0;
 }
 
 static inline bool _cpu_invpcid_supported(void)
@@ -204,26 +217,21 @@ static inline int _vmwrite(uint64_t field_enc, uint64_t value)
 
     if(!status)
     {
-        return 0; 
+        return 0;   /* success: CF=0 and ZF=0 */
     }
 
-    /*pushes error code to error field of vmcs on write fails */ 
-
-    else
-    {
-        uint64_t error_code = __vmread(VMCS_INSTRUCTION_ERROR_FIELD); 
-
-        if(error_code == 0)
-        {
-            return (int)error_code; 
-        } 
-        else
-        {
-            return - 1; 
-
-        }
-
-    }
+    /*
+     * vmwrite failed (VMfailValid sets ZF, VMfailInvalid sets CF). Read the
+     * VM-instruction error field for diagnostics, but ALWAYS report failure.
+     *
+     * The previous code returned (int)error_code when error_code == 0, i.e. it
+     * returned 0 (== success) for exactly the worst case: a VMfailInvalid with
+     * no current VMCS, where the follow-up __vmread also fails and yields 0.
+     * That silently masked every mis-set VMCS field, so callers proceeded to a
+     * VMLAUNCH that then failed with no diagnostic.
+     */
+    uint64_t error_code = __vmread(VMCS_INSTRUCTION_ERROR_FIELD);
+    return error_code ? -(int)error_code : -1;
 }
 static inline int __vmclear(u64 pa)
 {
@@ -277,7 +285,7 @@ static inline int _get_vmcs_size(void)
 
     if(!vmcs_size)
     {
-        pr_err("Invalid VMCS size from VMX_BASIC MSR: 0x%ll\n", vmx_basic); 
+        pr_err("Invalid VMCS size from VMX_BASIC MSR: 0x%llx\n", vmx_basic);
         return -1; 
 
     }

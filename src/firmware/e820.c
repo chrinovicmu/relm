@@ -10,7 +10,7 @@
 #include <linux/printk.h>
 #include <linux/string.h>
  
-#include <include/vm.h>
+#include <relm/vm.h>
 #include <include/firmware/e820.h>
 #include <utils/utils.h>
 

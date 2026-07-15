@@ -69,7 +69,29 @@ struct relm_vm_stats
 
 }; 
 
-/*A single VM instance */ 
+struct relm_vm_operations
+{
+    int (*vm_init)(struct relm_vm *vm);
+
+    void (*vm_destroy)(struct relm_vm *vm);
+
+    /*create, arch-initilizer, and register one vCPU*/
+    int (*add_vcpu)(struct relm_vm *vm, int vpid);
+
+    /* Nanoseconds since VM start. */
+    uint64_t (*get_uptime)(struct relm_vm *vm);
+
+    /* Aggregate vCPU utilisation, 0–100. */
+    uint64_t (*get_cpu_utilization)(struct relm_vm *vm);
+
+    /* Dump guest registers for a specific vCPU to the kernel log. */
+    void (*dump_regs)(struct relm_vm *vm, int vcpu_id);
+
+    /* Print exit statistics to the kernel log. */
+    void (*print_stats)(struct relm_vm *vm);
+};
+
+/*A single VM instance */
 struct relm_vm
 {
     int vm_id;
@@ -93,28 +115,6 @@ struct relm_vm
 
     spinlock_t lock; 
 }; 
-
-struct relm_vm_operations 
-{
-    int (*vm_init)(struct relm_vm *vm);
-
-    void (*vm_destroy)(struct relm_vm *vm);
-
-    /*create, arch-initilizer, and register one vCPU*/ 
-    int (*add_vcpu)(struct relm_vm *vm, int vpid); 
-
-    /* Nanoseconds since VM start. */
-    uint64_t (*get_uptime)(struct relm_vm *vm);
-
-    /* Aggregate vCPU utilisation, 0–100. */
-    uint64_t (*get_cpu_utilization)(struct relm_vm *vm);
-
-    /* Dump guest registers for a specific vCPU to the kernel log. */
-    void (*dump_regs)(struct relm_vm *vm, int vcpu_id);
-
-    /* Print exit statistics to the kernel log. */
-    void (*print_stats)(struct relm_vm *vm);
-};
 
 struct relm_mem_ops
 {

@@ -1,11 +1,11 @@
 #ifndef VMEXIT_H
 #define VMEXIT_H
 
-#include <include/vm.h> 
-#include <include/vmcs_state.h>
-#include <include/vmx.h>
-#include <include/vmx_ops.h>
-#include <utils/utils.h> 
+#include <relm/vm.h>
+#include <vmcs_state.h>
+#include <vmx.h>
+#include <vmx_ops.h>
+#include <utils/utils.h>
 
 #define VM_EXIT_REASON                          0x00004402
 #define VM_EXIT_QUALIFICATION                   0x00006400
@@ -95,5 +95,9 @@ struct stack_guest_gprs {
 } __attribute__((packed));
 
 int handle_vmexit(struct stack_guest_gprs *guest_gprs);
+
+/* Generic-loop hook (vcpu_arch_ops.handle_exit). The real exit handling
+ * happens in handle_vmexit(), called from the VM-exit asm stub. */
+int vmx_handle_exit(struct vcpu *vcpu);
 
 #endif

@@ -17,9 +17,9 @@
 #include <linux/slab.h>                                 
 #include <linux/mm.h>       
  
-#include <include/vm.h>     
-#include <include/ept.h>       
-#include <include/iommu.h>
+#include <relm/vm.h>
+#include <ept.h>
+#include <relm/iommu.h>
 #include <utils/utils.h>
 
 static int relm_iommu_fault_handler(struct iommu_domain *domain, 
@@ -29,7 +29,7 @@ static int relm_iommu_fault_handler(struct iommu_domain *domain,
                                     void *token)
 {
     struct relm_vm *vm = (struct relm_vm*)token; 
-    vm->iommu.fault_count++; 
+    vm->arch.iommu.fault_count++; 
 
     pr_err("RELM: IOMMU FAULT on VM '%s': device=%s IOVA=0x%lx %s\n"
            "      fault_count=%llu — DMA transaction aborted by IOMMU\n",
@@ -37,14 +37,14 @@ static int relm_iommu_fault_handler(struct iommu_domain *domain,
            dev_name(dev),
            iova,
            (flags & IOMMU_FAULT_WRITE) ? "WRITE" : "READ",
-           vm->iommu.fault_count);
+           vm->arch.iommu.fault_count);
 
     return -ENOSYS;
 }
 
 int relm_iommu_init(struct relm_vm *vm, struct device *dev)
 {
-    struct relm_iommu_context *iommu = &vm->iommu; 
+    struct relm_iommu_context *iommu = &vm->arch.iommu; 
 
     if(!iommu_present(dev->bus))
     {
@@ -92,13 +92,13 @@ int relm_iommu_init(struct relm_vm *vm, struct device *dev)
 
 void relm_iommu_destroy(struct relm_vm *vm)
 {
-    struct relm_iommu_context *iommu = &vm->iommu; 
+    struct relm_iommu_context *iommu = &vm->arch.iommu; 
     struct relm_pass_device *entry, *tmp; 
 
-    if(!iommu->enabled || iommu->domain)
-        return; 
+    if(!iommu->enabled || !iommu->domain)
+        return;
 
-    list_for_each_entry(entry, &iommu->devices, link){
+    list_for_each_entry_safe(entry, tmp, &iommu->devices, link){
     
         pr_info("RELM: IOMMU: detaching device %s from VM '%s'\n",
                 pci_name(entry->pdev), vm->vm_name);
@@ -123,7 +123,7 @@ int relm_iommu_map(struct relm_vm *vm,
                    uint64_t gpa, uint64_t hpa, 
                    size_t size, bool write)
 {
-    struct relm_iommu_context *iommu = &vm->iommu; 
+    struct relm_iommu_context *iommu = &vm->arch.iommu; 
     int prot; 
     int ret; 
 
@@ -159,7 +159,7 @@ int relm_iommu_map(struct relm_vm *vm,
 
 void relm_iommu_unmap(struct relm_vm *vm, uint64_t gpa, size_t size)
 {
-    struct relm_iommu_context *iommu = &vm->iommu;
+    struct relm_iommu_context *iommu = &vm->arch.iommu;
     size_t unmapped;
  
     if(!iommu->enabled || !iommu->domain)
@@ -185,7 +185,7 @@ void relm_iommu_unmap(struct relm_vm *vm, uint64_t gpa, size_t size)
  
 int relm_iommu_map_guest_ram(struct relm_vm *vm)
 {
-    struct relm_iommu_context *iommu = &vm->iommu;
+    struct relm_iommu_context *iommu = &vm->arch.iommu;
     uint64_t gpa;
     uint64_t hpa;
     uint64_t n_mapped  = 0;
@@ -201,12 +201,12 @@ int relm_iommu_map_guest_ram(struct relm_vm *vm)
  
     pr_info("RELM: IOMMU: mapping %llu MB of guest RAM "
             "(GPA 0x0 – 0x%llx)...\n",
-            vm->total_guest_ram / (1024 * 1024),
-            vm->total_guest_ram);
+            vm->memory.total_guest_ram / (1024 * 1024),
+            vm->memory.total_guest_ram);
  
-    for(gpa = 0; gpa < vm->total_guest_ram; gpa += PAGE_SIZE)
+    for(gpa = 0; gpa < vm->memory.total_guest_ram; gpa += PAGE_SIZE)
     {
-        ret = relm_ept_get_mapping(vm->ept, gpa, &hpa);
+        ret = relm_ept_get_mapping(vm->arch.ept, gpa, &hpa);
         if(ret)
         {
             n_skipped++;
@@ -235,7 +235,7 @@ int relm_iommu_map_guest_ram(struct relm_vm *vm)
 
 int relm_iommu_attach_device(struct relm_vm *vm, struct pci_dev *pdev)
 {
-    struct relm_iommu_context *iommu = &vm->iommu; 
+    struct relm_iommu_context *iommu = &vm->arch.iommu; 
     struct relm_pass_device *entry; 
     int ret; 
 
@@ -279,7 +279,7 @@ int relm_iommu_attach_device(struct relm_vm *vm, struct pci_dev *pdev)
 
 void relm_iommu_detach_device(struct relm_vm *vm, struct pci_dev *pdev)
 {
-    struct relm_iommu_context      *iommu = &vm->iommu;
+    struct relm_iommu_context      *iommu = &vm->arch.iommu;
     struct relm_pass_device *entry, *tmp;
  
     if(!iommu->enabled || !iommu->domain)
@@ -309,7 +309,7 @@ void relm_iommu_detach_device(struct relm_vm *vm, struct pci_dev *pdev)
 
 void relm_iommu_dump_stats(const struct relm_vm *vm)
 {
-    const struct relm_iommu_context      *iommu = &vm->iommu;
+    const struct relm_iommu_context      *iommu = &vm->arch.iommu;
     const struct relm_pass_device *entry;
  
     pr_info("RELM: IOMMU stats for VM '%s':\n", vm->vm_name);

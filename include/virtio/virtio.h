@@ -60,7 +60,7 @@ struct vring_desc{
     __le32 len; 
     __le16 flags; 
     __le16 next; 
-}__atrribute__((packed)); 
+}__attribute__((packed)); 
 
 /*skip interrupts for next completion */ 
 #define VRING_AVAIL_F_NO_INTERRUPT 1
@@ -77,7 +77,7 @@ struct vring_avail {
 struct vring_used_entry{
     __le32 id; 
     __le32 len; 
-} __atrribute__((packed)); 
+} __attribute__((packed)); 
 
 struct vring_used{
     __le16 flags; 
@@ -93,7 +93,7 @@ struct relm_virtqueue
     uint64_t used_gpa;
 
     /*host read position */ 
-    uint16 last_avial_idx; 
+    uint16_t last_avail_idx;
 
     /*true once all GPAs are non-zero, QeueReady is set, 
      * and Device status has reached DRIVER_OK */ 
@@ -111,11 +111,11 @@ struct relm_virtio_device
     unsigned int irq;
     struct relm_vm *vm; 
     uint8_t status; 
-    uint32 guest_features; 
+    uint32_t guest_features;
     uint8_t isr; 
     struct relm_virtqueue queues[RELM_VIRTIO_MAX_QUEUES]; 
     unsigned int queue_count; 
-    const struct relm_virtio_device_ops *op; 
+    const struct relm_virtio_device_ops *ops;
     char name[32]; 
     spinlock_t reg_lock; 
 }; 
@@ -127,10 +127,10 @@ struct relm_virtio_device_ops{
     uint32_t (*device_features)(struct relm_virtio_device *dev, 
                                 uint32_t sel); 
 
-    void (*drivers_features_ack)(struct relm_virtio_device *dev, 
+    void (*driver_features_ack)(struct relm_virtio_device *dev,
                                  uint32_t sel, uint32_t value); 
 
-    uint16 (*queue_num_max)(struct relm_virtio_device *dev, 
+    uint16_t (*queue_num_max)(struct relm_virtio_device *dev,
                             unsigned int queue_index);
 
     uint32_t (*config_read)(struct relm_virtio_device *dev, 
@@ -164,18 +164,18 @@ static inline uint64_t vring_used_ring_gpa(uint64_t used_base_gpa)
     return used_base_gpa + sizeof(struct vring_used); 
 }
 
-static inline uint64_t vring_avail_total_size(uint16 queue_size)
+static inline uint64_t vring_avail_total_size(uint16_t queue_size)
 {
 /* flags(2) + idx(2) + ring[queue_size]*2 + used_event(2) */
     return sizeof(struct vring_avail)
-        + (uint64_t)queue_size + sizeof(__le16) + sizeof(__le16); 
+        + (uint64_t)queue_size * sizeof(__le16) + sizeof(__le16);
 }
 
 static inline uint64_t vring_used_total_size(uint16_t queue_size)
 {
     /* flags(2) + idx(2) + ring[queue_size]*8 + avail_event(2) */
     return sizeof(struct vring_used)
-         + (uint64_t)queue_size * sizeof(struct vring_used_elem)
+         + (uint64_t)queue_size * sizeof(struct vring_used_entry)
          + sizeof(__le16);
 }
  
@@ -184,11 +184,14 @@ static inline uint64_t vring_desc_table_total_size(uint16_t queue_size)
     return (uint64_t)queue_size * sizeof(struct vring_desc);
 }
 
-void relm_virtio_mmio_register_access(struct relm_virtio_device *dev, 
-                                      unsigned int offset, 
-                                      bool is_write, 
-                                      uint32_t *value, 
-                                      bool *need_irq); 
+void relm_virtio_mmio_register_access(struct relm_virtio_device *dev,
+                                      unsigned int offset,
+                                      bool is_write,
+                                      uint32_t *value,
+                                      bool *need_irq);
+
+struct relm_virtio_device *
+relm_virtio_find_device_for_gpa(struct relm_vm *vm, uint64_t fault_gpa);
 
 
 #endif

@@ -12,7 +12,7 @@
 #include <linux/string.h>     
 #include <linux/byteorder/generic.h>  
  
-#include <include/vm.h>
+#include <relm/vm.h>
 #include <include/firmware/e820.h>
 #include <include/firmware/fw_cfg.h>
 #include <utils/utils.h>
@@ -277,7 +277,7 @@ int relm_fw_cfg_setup(struct fw_cfg_device *fw, struct relm_vm *vm)
     ret = relm_fw_cfg_register(fw, FW_CFG_UUID, NULL, uuid, sizeof(uuid));
     if(ret) return ret;
 
-    ram_size_le = (uint32_t)vm->total_guest_ram;  /* fits in 32 bits for ≤4 GB */
+    ram_size_le = (uint32_t)vm->memory.total_guest_ram;  /* fits in 32 bits for ≤4 GB */
     ret = relm_fw_cfg_register(fw, FW_CFG_RAM_SIZE, NULL,
                                 &ram_size_le, sizeof(ram_size_le));
     if(ret) 

@@ -1,6 +1,9 @@
+#ifndef RELM_VIRTIO_MMIO_H
+#define RELM_VIRTIO_MMIO_H
+
 #include <linux/types.h>
 #include <linux/mm.h>
- 
+
 struct vcpu;
 struct relm_vm;
 struct relm_virtio_device;
@@ -51,11 +54,11 @@ struct relm_virtio_device;
 
 /*total size of the register block + config space. 
 * page aligned*/ 
-#define RELM_VIRTIO_MMIO_REGION             0x1000U 
+#define RELM_VIRTIO_MMIO_REGION_SIZE        0x1000U
 
 #define RELM_VIRTIO_MMIO_IRQ   5
 
-#define RELM_MAC_MMIO_REGIONS  8 
+#define RELM_MAX_MMIO_REGIONS  8
 
 struct relm_mmio_region{
     uint64_t gpa_start; 
@@ -91,8 +94,10 @@ int relm_virtio_mmio_register_device(struct relm_virtio_device *dev,
 
 void relm_virtio_mmio_unregister_device(struct relm_virtio_device *dev);
 
-bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu, 
-                                           uint64_t fault_gpa); 
+bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu,
+                                           uint64_t fault_gpa);
+
+#endif /* RELM_VIRTIO_MMIO_H */
 
 
 

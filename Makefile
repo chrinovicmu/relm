@@ -1,12 +1,6 @@
 # Makefile — RELM hypervisor, multi-architecture Kbuild
 MODULE_NAME := relm
 
-AS      ?= $(CROSS_COMPILE)as
-OBJCOPY ?= $(CROSS_COMPILE)objcopy
-
-KDIR ?= /lib/modules/$(shell uname -r)/build
-PWD  := $(shell pwd)
-
 ARCH      ?= x86
 SUBTARGET ?= vmx
 
@@ -27,6 +21,13 @@ else
         SUBTARGET :=
     endif
 endif
+
+ifneq ($(KERNELRELEASE),)
+# =============================================================================
+# Kbuild context — this file is re-read by the kernel build system with
+# KERNELRELEASE set. Only object lists and flags may live here; any host
+# rule would be resolved relative to the kernel tree and fail.
+# =============================================================================
 
 ifeq ($(SUBTARGET),)
     ARCH_INCLUDE_DIR := $(src)/include/arch/$(ARCH)
@@ -64,10 +65,10 @@ CORE_OBJS := \
     src/core/relm.o
 
 BOOT_OBJS := \
-    src/boot/linux_loader.o \
-    src/boot/stub.o         \
-    src/firmware/e820.o     \
-    src/firmware/fw_cfg.o   \
+    src/arch/x86/boot/boot.o \
+    src/arch/x86/boot/stub.o \
+    src/firmware/e820.o      \
+    src/firmware/fw_cfg.o    \
     src/firmware/seabios.o
 
 VIRTIO_OBJS := \
@@ -116,7 +117,36 @@ ifneq ($(ARCH_SHARED_DIR),)
     asflags-y += -I$(ARCH_SHARED_DIR)
 endif
 
-.PHONY: all modules clean info
+else
+# =============================================================================
+# Host context — invoked from the command line. Prepares generated inputs
+# (guest binary, relm_arch symlink) then hands off to the kernel build.
+# =============================================================================
+
+AS      ?= $(CROSS_COMPILE)as
+OBJCOPY ?= $(CROSS_COMPILE)objcopy
+
+KDIR ?= /lib/modules/$(shell uname -r)/build
+PWD  := $(shell pwd)
+
+.PHONY: all modules clean info FORCE
+.DEFAULT_GOAL := all
+
+# The generic layer (include/relm/*) reaches arch-specific headers through the
+# stable prefix <relm_arch/...>. We wire that prefix to the active arch backend
+# with a symlink instead of hardcoding the path in generic headers, so adding a
+# new backend only re-points this link. Resolves via -I$(src)/include.
+RELM_ARCH_LINK    := include/relm_arch
+RELM_ARCH_TARGET  := arch/$(ARCH)$(if $(SUBTARGET),/$(SUBTARGET),)
+
+# FORCE prerequisite: re-run on every build so switching ARCH/SUBTARGET
+# re-points an existing link instead of silently keeping the previous
+# backend's headers (ln -sfn is idempotent when nothing changed).
+$(RELM_ARCH_LINK): FORCE
+	@echo "  LN        $(RELM_ARCH_LINK) -> $(RELM_ARCH_TARGET)"
+	ln -sfn $(RELM_ARCH_TARGET) $(RELM_ARCH_LINK)
+
+FORCE:
 
 all: modules
 
@@ -129,13 +159,11 @@ guest/guest_kernel.bin: guest/guest_kernel.S
 
 	@printf "  GUEST     %d bytes → $@\n" "$$(wc -c < $@)"
 
-modules: guest/guest_kernel.bin
+modules: guest/guest_kernel.bin $(RELM_ARCH_LINK)
 	@echo ""
 	@echo "  RELM build configuration:"
 	@echo "    ARCH      = $(ARCH)"
 	@echo "    SUBTARGET = $(if $(SUBTARGET),$(SUBTARGET),(none))"
-	@echo "    ARCH_DIR  = $(ARCH_INCLUDE_DIR)"
-	@echo "    ARCH_SRCS = $(ARCH_OBJS)"
 	@echo ""
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
@@ -143,6 +171,7 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
 	rm -f guest/guest_kernel.o \
 	      guest/guest_kernel.bin
+	rm -f $(RELM_ARCH_LINK)
 
 info:
 	@echo "========================================"
@@ -151,16 +180,7 @@ info:
 	@echo "  MODULE_NAME      = $(MODULE_NAME)"
 	@echo "  ARCH             = $(ARCH)"
 	@echo "  SUBTARGET        = $(if $(SUBTARGET),$(SUBTARGET),(none))"
-	@echo "  ARCH_INCLUDE_DIR = $(ARCH_INCLUDE_DIR)"
-	@echo "  ARCH_SHARED_DIR  = $(if $(ARCH_SHARED_DIR),$(ARCH_SHARED_DIR),(none))"
 	@echo "  KDIR             = $(KDIR)"
 	@echo "  CROSS_COMPILE    = $(if $(CROSS_COMPILE),$(CROSS_COMPILE),(native))"
-	@echo ""
-	@echo "  Arch source objects:"
-	@$(foreach obj,$(ARCH_OBJS),echo "    $(obj)";)
-	@echo ""
-	@echo "  Core objects:"
-	@$(foreach obj,$(CORE_OBJS),echo "    $(obj)";)
-	@echo ""
-	@echo "  ccflags-y:"
-	@echo "    $(ccflags-y)" | tr ' ' '\n' | sed 's/^/    /'
+
+endif

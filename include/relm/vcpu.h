@@ -87,7 +87,8 @@ struct vcpu_arch_ops {
     /* Enter the guest. Returns on every exit. */
     int  (*vcpu_run)(struct vcpu *vcpu);
 
-    /* Handle an exit. Returns 1 = handled, 0 = pass to generic. */
+    /* Post-exit hook, called by the generic loop after each unwound exit.
+     * Returns negative errno on a fatal condition, 0 otherwise. */
     int  (*handle_exit)(struct vcpu *vcpu);
 
     /* Free everything allocated by vcpu_alloc. */
@@ -97,7 +98,10 @@ struct vcpu_arch_ops {
     void (*vcpu_destroy)(struct vcpu *vcpu);
 
     int  (*setup_mmu)(struct vcpu *vcpu);
-    int  (*inject_irq)(struct vcpu *vcpu, unsigned int vector);
+
+    /* Deliver a platform IRQ line to the guest; the arch backend owns the
+     * line-to-vector translation. */
+    int  (*inject_irq)(struct vcpu *vcpu, unsigned int irq);
     int  (*read_msr)(struct vcpu *vcpu, uint32_t msr, uint64_t *val);
     int  (*write_msr)(struct vcpu *vcpu, uint32_t msr, uint64_t val);
     void (*dump_regs)(struct vcpu *vcpu);
@@ -105,7 +109,7 @@ struct vcpu_arch_ops {
 
 struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vcpu_id, 
                               const struct vcpu_arch_ops *arch_ops);
-void relm_vcpu_destroy(struct vcpu *vcpu);
+void relm_vcpu_free(struct vcpu *vcpu);
 
 int relm_vcpu_run(struct vcpu *vcpu);
 int relm_vcpu_stop(struct vcpu *vcpu);

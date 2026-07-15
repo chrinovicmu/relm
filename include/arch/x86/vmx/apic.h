@@ -68,6 +68,12 @@ struct relm_vm;
 #define APIC_VERSION_VALUE              0x00050014U /*intergated APIC, maxlvt=5*/ 
 #define APIC_SVR_RESET_VALUE            0X000000FFU /*APIC disabled*/ 
 #define APIC_SVR_SW_ENABLE               (1U << 8)
+/* Kernel asm/apicdef.h also defines these; override to our width. */
+#undef APIC_LVT_MASKED
+#undef APIC_LVT_TIMER_ONESHOT
+#undef APIC_LVT_TIMER_PERIODIC
+#undef APIC_LVT_TIMER_TSCDEADLINE
+
 #define APIC_LVT_MASKED                 (1ULL << 16)
 #define APIC_LVT_RESET_VALUE            APIC_LVT_MASKED
 
@@ -115,6 +121,10 @@ struct relm_vm;
 #define APIC_ESR_VALID_BITS             0x000000FFU
 #define APIC_ILLEGAL_VECTOR_THRESHOLD   16U
 
+/* Platform IRQ line -> APIC vector translation base. Vectors 0-31 are the
+ * x86 exception range, so device IRQs are remapped PIC-style above it. */
+#define RELM_IRQ_VECTOR_BASE            0x20U
+
 enum virt_apic_timer_mode {
     APIC_TIMER_MODE_ONESHOT      = 0,
     APIC_TIMER_MODE_PERIODIC     = 1,
@@ -153,7 +163,7 @@ struct virt_apic{
     uint32_t timer_icr; 
     uint32_t timer_dcr; 
 
-    enum virt_apic_timer_mode timer_mode; ; 
+    enum virt_apic_timer_mode timer_mode;
     uint64_t timer_start_ns; 
     uint64_t timer_deadline_tsc; 
 

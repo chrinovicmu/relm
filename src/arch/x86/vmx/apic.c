@@ -5,13 +5,14 @@
 #include <linux/ktime.h>
 #include <linux/spinlock.h>
 #include <asm/io.h>
-#include <include/vmx.h>
-#include <include/vm.h>
-#include <include/vmx_ops.h>
-#include <include/vmexit.h>
-#include <include/apic.h>
-#include <include/ept.h>
-#include <include/relm/decoder.h>
+#include <vmx.h>
+#include <relm/vm.h>
+#include <relm/vcpu.h>
+#include <vmx_ops.h>
+#include <vmexit.h>
+#include <apic.h>
+#include <ept.h>
+#include <relm/decoder.h>
 #include <utils/utils.h>
 
 /*EPT permissons flags for the APIC-access page at GPA 0xFEE00000. 
@@ -19,6 +20,24 @@
 #define EPT_APIC_FLAGS (0x3ULL)
 
 
+/*
+ * relm_apic_alloc() — allocate the two physical pages VMX needs to
+ * virtualise the local APIC for one vCPU:
+ *
+ *   vapic_page:       the "virtual-APIC page". With APIC-register
+ *                     virtualisation enabled, the CPU satisfies guest APIC
+ *                     *reads* directly from this page with zero VM-exits,
+ *                     so our software model (relm_vapic_sync_reg) must keep
+ *                     it in sync with every register we emulate.
+ *   apic_access_page: a dummy page mapped in EPT at GPA 0xFEE00000. Guest
+ *                     accesses that hit it trigger APIC-access VM-exits
+ *                     (reason 44) instead of ordinary EPT violations, which
+ *                     is how relm_apic_handle_access() gets invoked.
+ *
+ * Both pages are zeroed and their physical addresses cached for the VMCS
+ * fields written later in relm_apic_vmcs_setup(). Returns 0 or -ENOMEM
+ * (on failure nothing is left allocated).
+ */
 int relm_apic_alloc(struct virt_apic *apic)
 {
     apic->vapic_page = (uint8_t *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
@@ -46,6 +65,12 @@ int relm_apic_alloc(struct virt_apic *apic)
     return 0;
 }
  
+/*
+ * relm_apic_free() — release the pages from relm_apic_alloc(). Safe to
+ * call on a partially-initialised or already-freed struct: each page is
+ * freed only if present, and pointer + cached PA are cleared so a double
+ * free is impossible.
+ */
 void relm_apic_free(struct virt_apic *apic)
 {
     if(apic->vapic_page)
@@ -62,6 +87,20 @@ void relm_apic_free(struct virt_apic *apic)
     }
 }
 
+/*
+ * relm_apic_init() — put the software APIC model into architectural
+ * power-on reset state (SDM Vol 3A §10.4.7.1) and mirror that state into
+ * the virtual-APIC page so hardware-satisfied reads agree with the model:
+ *
+ *   - APIC ID goes in bits 31:24 of the ID register (xAPIC format);
+ *   - SVR resets to 0x000000FF (software-disabled, spurious vector 0xFF);
+ *   - DFR = all-ones = flat logical destination mode;
+ *   - every LVT entry starts MASKED so nothing fires before the guest
+ *     programs it;
+ *   - IRR/ISR/TMR bitmaps, TPR/PPR/ESR/LDR, ICR and all timer state clear.
+ *
+ * Called once per vCPU during VM construction, after relm_apic_alloc().
+ */
 void relm_apic_init(struct virt_apic *apic, uint8_t apic_id)
 {
     int i; 
@@ -129,6 +168,24 @@ void relm_apic_init(struct virt_apic *apic, uint8_t apic_id)
             apic_id, apic->vapic_page_pa, apic->apic_access_page_pa);
 }
 
+/*
+ * relm_apic_vmcs_setup() — program the per-vCPU VMCS fields that switch on
+ * hardware APIC virtualisation. Must run on the CPU where the vCPU's VMCS
+ * is current (vmptrld done), after relm_apic_alloc().
+ *
+ * Writes three VMCS fields:
+ *   VIRTUAL_APIC_PAGE_ADDR — PA of vapic_page (hardware read source);
+ *   APIC_ACCESS_ADDR       — PA of the access page (exit-44 trigger);
+ *   TPR_THRESHOLD          — 0, so TPR-below-threshold exits (reason 43)
+ *                            can never fire and guest TPR writes stay free.
+ *
+ * Then probes MSR_IA32_VMX_PROCBASED_CTLS2 (allowed-1 bits live in the
+ * high 32) and enables what the CPU supports:
+ *   VIRTUALIZE_APIC_ACCESSES — required for exit 44; if absent we fall
+ *     back to plain EPT-violation interception and return 0 (not an error);
+ *   APIC_REGISTER_VIRT       — optional; reads served from vapic_page with
+ *     zero exits. Support recorded in apic->apic_reg_virt_supported.
+ */
 int relm_apic_vmcs_setup(struct vcpu *vcpu)
 {
     struct virt_apic *apic = &vcpu->arch.apic; 
@@ -216,13 +273,23 @@ int relm_apic_vmcs_setup(struct vcpu *vcpu)
     return 0;
 }
 
+/*
+ * relm_apic_ept_setup() — install the EPT mapping that makes the APIC MMIO
+ * window trap. Maps guest-physical APIC_DEFAULT_BASE (0xFEE00000) to the
+ * host-physical apic_access_page with R=1 W=1 X=0, uncacheable. Because
+ * the GPA resolves to the page named in VMCS APIC_ACCESS_ADDR, the CPU
+ * raises an APIC-access VM-exit (reason 44) instead of letting the access
+ * through — the EPT permissions here are what a *non*-APIC access would
+ * get, not a way to bypass interception. X=0 because nothing may execute
+ * from APIC space.
+ */
 int relm_apic_ept_setup(struct vcpu *vcpu)
 {
     struct virt_apic *apic = &vcpu->arch.apic; 
     struct relm_vm *vm = vcpu->vm; 
     int ret; 
 
-    if(!vm || !vm->ept)
+    if(!vm || !vm->arch.ept)
     {
         pr_err("RELM: APIC EPT: no EPT context\n");
         return -EINVAL;
@@ -234,8 +301,8 @@ int relm_apic_ept_setup(struct vcpu *vcpu)
         return -EINVAL;
     }
 
-    ret = relm_ept_map_page(vm->ept,
-                            APIC_DEFAULT_BASE, 
+    ret = relm_ept_map_page(vm->arch.ept,
+                            APIC_DEFAULT_BASE,
                             apic->apic_access_page_pa,
                             EPT_APIC_FLAGS); 
     if(ret < 0)
@@ -252,6 +319,15 @@ int relm_apic_ept_setup(struct vcpu *vcpu)
 
 }
 
+/*
+ * relm_apic_set_error() — record an APIC error condition and raise the
+ * error interrupt if the guest asked for one. Models the two-stage ESR:
+ * errors accumulate in esr_pending; they only become guest-visible in ESR
+ * when the guest writes 0 to ESR to latch them (see relm_apic_write). If
+ * the APIC is software-enabled and LVT_ERROR is unmasked, the LVT_ERROR
+ * vector is injected — unless that vector itself is illegal (< 16), which
+ * would recursively be another error, so it is dropped with a debug note.
+ */
 void relm_apic_set_error(struct virt_apic *apic, uint32_t error_bit)
 {
     error_bit &= APIC_ESR_VALID_BITS; 
@@ -287,7 +363,20 @@ void relm_apic_set_error(struct virt_apic *apic, uint32_t error_bit)
     }
 }
 
-/*PPR update */ 
+/*
+ * relm_apic_ppr_update() — recompute the Processor Priority Register.
+ * PPR decides which pending interrupts may be delivered: an IRR vector is
+ * deliverable only if its priority class (vector >> 4) exceeds PPR's.
+ * Architecturally (SDM Vol 3A §10.8.3.1):
+ *
+ *   PPR = max(TPR[7:4], ISRV[7:4])   (low nibble reads as 0 here)
+ *
+ * where ISRV is the highest vector currently in service (highest set ISR
+ * bit). So PPR rises when the guest raises TPR *or* while a high-priority
+ * interrupt is being serviced. Must be re-run after every TPR write, EOI,
+ * and ISR change; result is synced to the virtual-APIC page for
+ * hardware-satisfied reads.
+ */
 void relm_apic_ppr_update(struct virt_apic *apic)
 {
     uint32_t isrv = 0; 
@@ -317,11 +406,22 @@ void relm_apic_ppr_update(struct virt_apic *apic)
     relm_vapic_sync_reg(apic, APIC_REG_PPR, apic->ppr); 
 }
 
-/*EOI 
-* clears the highest proiority ISR bit 
-* writing to the EOI register (offset 0xB0) signals that the CPU 
-* finished servicing the highest-priority in-service interrupt*/ 
-
+/*
+ * relm_apic_eoi() — End-Of-Interrupt processing. The guest writes the EOI
+ * register (offset 0xB0) to say "done servicing the current interrupt";
+ * this function performs the architectural side effects:
+ *
+ *   1. find and clear the highest-priority set ISR bit (that is by
+ *      definition the interrupt being serviced);
+ *   2. if that vector's TMR bit is set (level-triggered), clear it — on
+ *      real hardware this is also the point where an EOI message would be
+ *      broadcast to the I/O APIC (not modelled yet);
+ *   3. recompute PPR, since dropping the in-service vector may lower the
+ *      processor priority and unblock lower-priority pending interrupts.
+ *
+ * An EOI with an empty ISR is spurious and ignored, matching hardware.
+ * All touched registers are synced to the virtual-APIC page.
+ */
 static void relm_apic_eoi(struct virt_apic *apic)
 {
     int word, bit; 
@@ -362,7 +462,24 @@ static void relm_apic_eoi(struct virt_apic *apic)
     relm_apic_ppr_update(apic);
 }
 
-static int relm_apic_ipi_resolve_targets(struct relm_vm *vm, 
+/*
+ * relm_apic_ipi_resolve_targets() — turn the destination encoded in an
+ * ICR write into a concrete list of target vCPUs (filled into targets[],
+ * count returned). Resolution follows the ICR shorthand field first:
+ *
+ *   SELF      — only the sending vCPU;
+ *   ALL_INCL  — every vCPU, sender included;
+ *   ALL_EXCL  — every vCPU except the sender;
+ *   NONE      — use the destination field in ICR_HIGH[31:24], interpreted
+ *               by the destination-mode bit (ICR bit 11):
+ *                 physical: match APIC ID exactly;
+ *                 logical:  AND against each vCPU's LDR (flat model —
+ *                           dest is a bitmask, several vCPUs can match).
+ *
+ * Zero targets is a legal outcome (e.g. IPI to an APIC ID that does not
+ * exist); the caller just delivers nothing.
+ */
+static int relm_apic_ipi_resolve_targets(struct relm_vm *vm,
                                          struct vcpu *sender, 
                                          uint32_t icr_low, 
                                          uint32_t icr_high, 
@@ -410,12 +527,12 @@ static int relm_apic_ipi_resolve_targets(struct relm_vm *vm,
 
                 if(!logical)
                 {
-                    uint8_t cand_id = (uint8_t)(candidate->apic.apic_id >> 24); 
+                    uint8_t cand_id = (uint8_t)(candidate->arch.apic.apic_id >> 24);
                     if(cand_id == dest_field)
                         targets[found++] = candidate; 
                 }
                 else {
-                    uint8_t cand_ldr = (uint8_t)(candidate->apic.ldr >> 24); 
+                    uint8_t cand_ldr = (uint8_t)(candidate->arch.apic.ldr >> 24);
                     if((cand_ldr & dest_field) != 0)
                         targets[found++] = candidate; 
                 }
@@ -426,8 +543,17 @@ static int relm_apic_ipi_resolve_targets(struct relm_vm *vm,
     return found; 
 }
 
-/*deliver one IPI to one resolved target VCPU */ 
-static void relm_apic_ipi_deliver(struct vcpu *sender, 
+/*
+ * relm_apic_ipi_deliver() — deliver one IPI to one already-resolved target
+ * vCPU, switching on the ICR delivery mode. Only FIXED delivery is
+ * implemented: the vector is set in the target's IRR via
+ * relm_apic_inject_interrupt() (which also wakes a halted target). The
+ * SMP bring-up modes — INIT (reset target to wait-for-SIPI), STARTUP/SIPI
+ * (start target in real mode at page (vector & 0xFF) << 12), NMI and SMI —
+ * are logged and deferred until RELM runs more than one vCPU; the TODO
+ * blocks in each case sketch the required implementation steps.
+ */
+static void relm_apic_ipi_deliver(struct vcpu *sender,
                                   struct vcpu *target, 
                                   uint32_t  delivery_mode, 
                                   uint32_t vector, 
@@ -442,7 +568,7 @@ static void relm_apic_ipi_deliver(struct vcpu *sender,
             PDEBUG("RELM: APIC: IPI FIXED vec=0x%02x %s → VCPU%u",
                    vector, level ? "level" : "edge", target->vpid);
 
-            relm_apic_inject_interrupt(&target->apic, (uint8_t)vector, level); 
+            relm_apic_inject_interrupt(&target->arch.apic, (uint8_t)vector, level);
             break;
 
         /*TODO :
@@ -511,10 +637,28 @@ static void relm_apic_ipi_deliver(struct vcpu *sender,
     }
 }
 
+/*
+ * relm_apic_handle_icr_write() — side effects of a guest write to ICR_LOW
+ * (offset 0x300). On real hardware this write *sends* the IPI, so we:
+ *
+ *   1. recover the sending vcpu from the embedded apic pointer (two
+ *      container_of hops: virt_apic -> vcpu_arch -> vcpu);
+ *   2. decompose the value into delivery mode / vector / shorthand /
+ *      trigger level;
+ *   3. store icr_low and sync it to the virtual-APIC page with the
+ *      SEND_PENDING bit clear — our delivery below is synchronous and
+ *      complete before the guest can possibly poll the bit, so it must
+ *      never read as still-sending;
+ *   4. resolve the destination to a vCPU list and deliver to each.
+ *
+ * ICR_HIGH must already hold the destination field; guests always write
+ * ICR_HIGH first (writing ICR_LOW is what triggers the send).
+ */
 static void relm_apic_handle_icr_write(struct virt_apic *apic, uint32_t value)
 {
-    struct vcpu *sender = container_of(apic, struct vcpu, apic); 
-    struct relm_vm *vm = sender->vm; 
+    struct vcpu_arch *va = container_of(apic, struct vcpu_arch, apic);
+    struct vcpu *sender = container_of(va, struct vcpu, arch);
+    struct relm_vm *vm = sender->vm;
 
     uint32_t delivery_mode = (value & APIC_ICR_DELIVERY_MASK);
     uint32_t shorthand     = value & APIC_ICR_SHORTHAND_MASK;
@@ -559,6 +703,20 @@ static void relm_apic_handle_icr_write(struct virt_apic *apic, uint32_t value)
 }
 
 
+/*
+ * relm_apic_get_timer_ccr() — compute the timer Current Count Register on
+ * demand. We do not run a countdown in software; instead the count is
+ * derived from wall-clock time whenever the guest reads CCR:
+ *
+ *   ticks = elapsed_ns / (10ns * divisor)
+ *
+ * i.e. the virtual timer base frequency is fixed at 100 MHz (one tick per
+ * 10 ns before division), scaled by the DCR divide value (1..128, encoded
+ * in DCR bits 3 and 1:0 per SDM §10.5.4). One-shot mode counts down and
+ * clamps at 0; periodic mode reloads, so the count is ICR minus
+ * (ticks mod ICR). Returns 0 when the timer is unarmed (ICR == 0 or never
+ * started).
+ */
 uint32_t relm_apic_get_timer_ccr(struct virt_apic *apic)
 {
     uint64_t elapsed_ns;
@@ -596,31 +754,71 @@ uint32_t relm_apic_get_timer_ccr(struct virt_apic *apic)
     return ccr;
 }
 
-void relm_apic_inject_interrupt(struct virt_apic *apic, uint8_t vector, 
+/*
+ * relm_apic_inject_interrupt() — make a vector pending in this APIC's IRR.
+ * This is the single entry point every interrupt source funnels through:
+ * fixed IPIs, LVT error interrupts, the virtio backends (via the
+ * inject_irq vcpu op), the timer.
+ *
+ * Under the apic spinlock (callers may run on other CPUs, e.g. a sender
+ * vCPU injecting into this one), sets the vector's IRR bit and sets or
+ * clears the matching TMR bit for level- vs edge-triggered, then syncs
+ * both words to the virtual-APIC page. Finally clears vcpu->halted and
+ * wakes the vCPU's waitqueue: a HLT'ed guest must resume when an
+ * interrupt becomes pending, and relm_vcpu_loop sleeps on vcpu->wq.
+ * Actual delivery into the guest (IRR -> ISR, vector on VM-entry) happens
+ * later in the run loop when priority allows.
+ */
+void relm_apic_inject_interrupt(struct virt_apic *apic, uint8_t vector,
                                 bool level_triggered)
 {
-    uint32_t word = APIC_VEC_WORD(vector); 
-    uint32_t mask = APIC_VEC_MASK(vector); 
+    struct vcpu *vcpu = container_of(apic, struct vcpu, arch.apic);
+    uint32_t word = APIC_VEC_WORD(vector);
+    uint32_t mask = APIC_VEC_MASK(vector);
 
-    spin_lock(&apic->lock); 
+    spin_lock(&apic->lock);
 
-    apic->irr[word] |= mask; 
+    apic->irr[word] |= mask;
 
     if(level_triggered)
-        apic->tmr[word] |= mask; 
-    else 
+        apic->tmr[word] |= mask;
+    else
         apic->tmr[word] &= ~mask;
 
-    relm_vapic_sync_reg(apic, APIC_REG_IRR(word), apic->irr[word]); 
-    relm_vapic_sync_reg(apic, APIC_REG_TMR(word),apic->tmr[word]); 
+    relm_vapic_sync_reg(apic, APIC_REG_IRR(word), apic->irr[word]);
+    relm_vapic_sync_reg(apic, APIC_REG_TMR(word),apic->tmr[word]);
 
-    spin_unlock(&apic->lock); 
+    spin_unlock(&apic->lock);
+
+    /* A pending interrupt must wake the vCPU if it is idling after HLT:
+     * relm_vcpu_loop sleeps on vcpu->wq until halted is cleared. */
+    vcpu->halted = false;
+    wake_up(&vcpu->wq);
 
     PDEBUG("RELM: APIC: injected vector %u (%s) IRR[%u]=0x%08x\n",
            vector, level_triggered ? "level" : "edge",
            word, apic->irr[word]);
 }
 
+/*
+ * relm_apic_read() — emulate a guest read of one APIC register, given the
+ * page offset from the exit qualification. Reached on the exit path only:
+ * when APIC-register virtualisation is on, most reads are served from the
+ * virtual-APIC page with no exit and never get here.
+ *
+ * Most registers return the cached software-model value. The exceptions:
+ *   TPR — re-read from the virtual-APIC page first, because hardware CR8/
+ *         TPR virtualisation lets the guest update TPR there without an
+ *         exit, so our cached copy may be stale;
+ *   PPR — recomputed on demand from TPR/ISR (never stored authoritatively);
+ *   CCR — derived from elapsed time (see relm_apic_get_timer_ccr);
+ *   EOI/RRD — write-only / Pentium-remote-read relics, read as 0;
+ *   ISR/TMR/IRR — 8-word bitmaps at 0x10 stride; the word index is
+ *         computed from the offset in the default branch.
+ *
+ * Unaligned or reserved offsets read as 0 (reserved also returns -EINVAL
+ * so the caller can log); *value is always written.
+ */
 int relm_apic_read(struct vcpu *vcpu, uint32_t offset, uint32_t *value)
 {
     struct virt_apic *apic = &vcpu->arch.apic;
@@ -781,8 +979,29 @@ int relm_apic_read(struct vcpu *vcpu, uint32_t offset, uint32_t *value)
     return 0;
 }
 
-/*all APIC writes cause APIC-access VM-exits(reason 44, access type 1) 
- * */ 
+/*
+ * relm_apic_write() — emulate a guest write of one APIC register. Unlike
+ * reads, ALL APIC writes reach us: even with APIC-register virtualisation,
+ * writes still cause APIC-access VM-exits (reason 44, access type 1), so
+ * this switch is the authoritative write path for every register.
+ *
+ * The pattern for each register is: apply the architectural write
+ * semantics to the software model, then relm_vapic_sync_reg() the result
+ * into the virtual-APIC page so subsequent hardware-satisfied *reads*
+ * observe it. Notable per-register semantics handled below:
+ *   - ID/LDR keep only bits 31:24; TPR keeps 7:0; DFR forces 27:0 to 1;
+ *   - VERSION, ISR/TMR/IRR bitmaps and timer CCR are read-only — writes
+ *     are silently ignored like hardware;
+ *   - TPR writes recompute PPR;
+ *   - EOI triggers the full end-of-interrupt sequence (relm_apic_eoi);
+ *   - SVR bit 8 is the software-enable switch (tracked in is_enabled);
+ *   - ESR write-0-to-latch: pending errors move into the readable ESR;
+ *   - ICR_LOW *sends an IPI* (relm_apic_handle_icr_write);
+ *   - TIMER_ICR arms the timer (captures start timestamp) or stops it
+ *     when 0 is written; LVT_TIMER bits 18:17 select the timer mode.
+ *
+ * Returns 0, or -EINVAL for writes to reserved/unknown offsets.
+ */
 int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
 {
     struct virt_apic * apic = &vcpu->arch.apic; 
@@ -998,87 +1217,139 @@ int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
     return 0;
 }
 
+/*
+ * relm_apic_handle_access() — top-level handler for APIC-access VM-exits
+ * (exit reason 44). The guest touched the APIC page at GPA 0xFEE00000;
+ * hardware gives us only the page offset and access type in the exit
+ * qualification — NOT the value being written or the destination register.
+ * Those we must recover ourselves by fetching and decoding the faulting
+ * instruction, exactly like the virtio-MMIO EPT-violation path in
+ * src/virtio/mmio.c.
+ *
+ * Flow:
+ *   1. read exit qualification → register offset + access type;
+ *   2. copy the instruction bytes at the guest RIP out of guest memory;
+ *   3. decode them (relm_decode_instruction) to learn the operands;
+ *   4. dispatch: writes resolve the source value (immediate or GPR) and
+ *      call relm_apic_write(); reads call relm_apic_read() and store the
+ *      result into the decoded destination GPR;
+ *   5. advance the guest RIP past the emulated instruction.
+ *
+ * GPR reads/writes go through guest_reg_read()/guest_reg_write() on
+ * vcpu->arch.regs — handle_vmexit() syncs that struct back into the
+ * on-stack GPR block before VMRESUME, so writes there do reach the guest.
+ * Returns 1 (resume guest), 0 with the vCPU stopped on a fatal condition,
+ * or negative errno.
+ */
 int relm_apic_handle_access(struct vcpu *vcpu)
 {
-    struct virt_apic *apic = &vcpu->arch.apic; 
-
-    uint64_t qual, guest_rip, instr_len; 
-    uint32_t offset, access_type, value; 
+    uint64_t qual, guest_rip, instr_len;
+    uint32_t offset, access_type, value;
     uint8_t insn_buf[15];
     struct relm_decoded_insn decoded;
-    int ret; 
+    int ret;
 
-    qual = __vmread(VM_EXIT_QUALIFICATION); 
-    offset = (uint32_t)(qual & APIC_ACCESS_OFFSET_MASK); 
-    access_type = (uint32_t)((qual & APIC_ACCESS_TYPE_MASK) >> APIC_ACCESS_TYPE_SHIFT); 
+    /* Exit qualification for reason 44 (SDM Vol 3C §27.2.1, table 27-6):
+     * bits 11:0 = offset of the access within the APIC page (i.e. which
+     * register), bits 15:12 = access type (linear read/write/fetch, guest
+     * event delivery, ...). */
+    qual = __vmread(VM_EXIT_QUALIFICATION);
+    offset = (uint32_t)(qual & APIC_ACCESS_OFFSET_MASK);
+    access_type = (uint32_t)((qual & APIC_ACCESS_TYPE_MASK) >> APIC_ACCESS_TYPE_SHIFT);
 
-    guest_rip = __vmread(GUEST_RIP); 
-    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN); 
+    /* RIP of the faulting instruction and its length in bytes — the
+     * length is hardware-provided so we know exactly how many bytes to
+     * fetch and how far to advance RIP afterwards. */
+    guest_rip = __vmread(GUEST_RIP);
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
 
     PDEBUG("RELM: APIC ACCESS: offset=0x%03x type=%u RIP=0x%llx len=%llu\n",
            offset, access_type, guest_rip, instr_len);
 
-    /* fetch the instruction bytes from guest memory before switching */
+    /* Fetch the raw instruction bytes from guest memory. Failure here is
+     * fatal for this exit: without the bytes we cannot know what the
+     * guest wanted, and resuming would re-execute the same instruction
+     * and fault forever. */
     ret = relm_vm_copy_from_guest(vcpu->vm, guest_rip, insn_buf, (size_t)instr_len);
     if (ret < 0) {
         pr_err("RELM: APIC: Failed to copy instruction bytes from guest GPA=0x%llx\n", guest_rip);
         return ret;
     }
-    /* run the decoder to fill the 'decoded' struct */
+    /* Decode into (is_write, op_size, src_reg/dst_reg, immediate) — see
+     * include/relm/decoder.h for the contract. */
     if (relm_decode_instruction(insn_buf, instr_len, &decoded) < 0) {
         pr_err("RELM: APIC: Instruction decoding failed at RIP=0x%llx\n", guest_rip);
         return -EINVAL;
     }
-    
+
     switch(access_type)
     {
         case APIC_ACCESS_TYPE_LINEAR_WRITE:
         case APIC_ACCESS_TYPE_EVENT_DELIVERY:
-            
-            /* DYNAMIC RESOLUTION: Check if the guest used an immediate or a register */
+
+            /* DYNAMIC RESOLUTION: the written value is either encoded in
+             * the instruction (mov $imm, mem) or lives in whatever GPR
+             * the guest chose (mov %reg, mem) — resolve accordingly. */
             if (decoded.is_immediate) {
                 value = (uint32_t)decoded.immediate;
             } else {
-                value = (uint32_t)vcpu_read_register(vcpu, decoded.src_reg); /* Resolves RCX, RDX, etc. */
+                value = (uint32_t)guest_reg_read(&vcpu->arch.regs, decoded.src_reg); /* Resolves RCX, RDX, etc. */
             }
 
+            /* Apply the write to the software APIC model (and its side
+             * effects: IPI send, timer arm, EOI, ...). */
             ret = relm_apic_write(vcpu, offset, value);
             if(ret < 0)
                 pr_warn("RELM: APIC: write to invalid offset 0x%03x "
                         "val=0x%08x at RIP=0x%llx\n",
                         offset, value, guest_rip);
-            break; 
+            break;
 
         case APIC_ACCESS_TYPE_LINEAR_READ:
-            
+
+            /* Emulate the register read; invalid offsets read as 0 (the
+             * guest still gets *something* and keeps running). */
             ret = relm_apic_read(vcpu, offset, &value);
             if(ret < 0) {
                 pr_warn("RELM: APIC: read from invalid offset 0x%03x at RIP=0x%llx\n", offset, guest_rip);
-                value = 0; 
+                value = 0;
             }
 
-            /* DYNAMIC INJECTION: Inject read value into whichever destination register the guest used */
-            vcpu_write_register(vcpu, decoded.dst_reg, (uint64_t)value);
+            /* DYNAMIC INJECTION: store the value into whichever
+             * destination GPR the decoded instruction names. The cast
+             * zero-extends, matching 32-bit mov semantics in long mode. */
+            guest_reg_write(&vcpu->arch.regs, decoded.dst_reg, (unsigned long)value);
             break;
 
         case APIC_ACCESS_TYPE_LINEAR_FETCH:
-            /* Invalid hardware condition */ 
+            /* The guest's instruction pointer landed inside the APIC
+             * page. No sane guest does this — nothing executable lives
+             * there — so treat it as unrecoverable and stop the vCPU
+             * rather than let it wedge in an exit loop. */
             pr_err("RELM: APIC: INSTRUCTION FETCH at APIC offset=0x%03x "
                    "RIP=0x%llx — guest instruction pointer in APIC space!\n",
                    offset, guest_rip);
             vcpu->state = VCPU_STATE_STOPPED;
-            return 0; 
+            return 0;
 
         default:
+            /* Other access types (physical-access subtypes etc.) are not
+             * expected with our setup; treat them as reads so the guest
+             * at least gets a coherent value. */
             PDEBUG("RELM: APIC: fallback access type=%u offset=0x%03x\n", access_type, offset);
             ret = relm_apic_read(vcpu, offset, &value);
             if(ret == 0) {
-                vcpu_write_register(vcpu, decoded.dst_reg, (uint64_t)value);
+                guest_reg_write(&vcpu->arch.regs, decoded.dst_reg, (unsigned long)value);
             }
             break;
     }
 
-    _vmwrite(GUEST_RIP, guest_rip + instr_len);
-    return 1; 
+    /* Step the guest past the emulated instruction. Update BOTH copies of
+     * RIP, matching the virtio-MMIO path (mmio.c): the VMCS field is what
+     * the CPU resumes from, and vcpu->arch.regs.rip keeps the software
+     * model (exit tracing, later handlers in this exit) consistent. */
+    vcpu->arch.regs.rip = guest_rip + instr_len;
+    _vmwrite(GUEST_RIP, vcpu->arch.regs.rip);
+    return 1;
 }
 

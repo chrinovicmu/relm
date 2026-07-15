@@ -76,21 +76,24 @@ void relm_virtio_mmio_unregister_device(struct relm_virtio_device *dev)
 }
 
 /*
- * find_device_for_gpa — locate which registered device, if any, owns
- * the GPA range containing fault_gpa. Private to this file — Section 4
- * is the only caller, reached after Section 1's cheaper generic gate
- * has already confirmed fault_gpa is SOME reserved range.
+ * relm_virtio_find_device_for_gpa — locate which of vm's registered devices,
+ * if any, owns the GPA range containing fault_gpa. The registry is
+ * module-global, so matching on GPA alone would resolve a fault in one VM to
+ * another VM's device whenever their memory maps coincide — always filter by
+ * the owning VM.
  */
-static struct relm_virtio_device *find_device_for_gpa(uint64_t fault_gpa)
+struct relm_virtio_device *
+relm_virtio_find_device_for_gpa(struct relm_vm *vm, uint64_t fault_gpa)
 {
     unsigned int i;
- 
-    for (i = 0; i < g_registered_count; i++) 
+
+    for (i = 0; i < g_registered_count; i++)
     {
         struct relm_virtio_device *dev = g_registered_devices[i];
         uint64_t end = dev->mmio_base_gpa + RELM_VIRTIO_MMIO_REGION_SIZE;
- 
-        if (fault_gpa >= dev->mmio_base_gpa && fault_gpa < end) {
+
+        if (dev->vm == vm &&
+            fault_gpa >= dev->mmio_base_gpa && fault_gpa < end) {
             return dev;
         }
     }
@@ -108,8 +111,8 @@ static struct mmio_selector_state g_selector_state[RELM_VIRTIO_MMIO_MAX_DEVICES]
 static struct mmio_selector_state * 
 selector_state_for(struct relm_virtio_device *dev)
 {
-    static struct mmio_selector_state dummy; 
-    unsigned int; 
+    static struct mmio_selector_state dummy;
+    unsigned int i;
 
     for(i = 0; i < g_registered_count; ++i){
         if(g_registered_devices[i] == dev)
@@ -147,12 +150,12 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
 
         case VIRTIO_MMIO_MAGIC_VALUE_OFF: 
             if(!is_write)
-                *value = VIRTIO_MMIO_MAGIC_VALUE 
+                *value = VIRTIO_MMIO_VALUE;
             return;
 
         case VIRTIO_MMIO_VERSION_OFF:
             if(!is_write)
-                *value = VIRTIO_MMIO_VERSON_MODERN; 
+                *value = VIRTIO_MMIO_VERSION_MODERN;
             return; 
 
         case VIRTIO_MMIO_DEVICE_ID_OFF:
@@ -165,15 +168,15 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
                 *value = RELM_VIRTIO_VENDOR_ID; 
             return;
 
-        case VIRTIO_MMIO_DEVICE_FEATURES_OFF: 
-            if(!write){
+        case VIRTIO_MMIO_DEVICE_FEATURES_OFF:
+            if(!is_write){
                 *value = dev->ops->device_features(dev, sel->device_features_sel); 
             }
             return; 
         
-        case VIRTIO_MMIO_DEVICE_FEATURES_SEL_OFF: 
-            if(!is_write)
-                sel->device_features_sel = *value; 
+        case VIRTIO_MMIO_DEVICE_FEATURES_SEL_OFF:
+            if(is_write)
+                sel->device_features_sel = *value;
             return;
         
         case  VIRTIO_MMIO_DRIVER_FEATURES_OFF: 
@@ -194,7 +197,7 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
         /*guest selects the virtqueue to configure*/ 
         case VIRTIO_MMIO_QUEUE_SEL_OFF: 
             if(is_write){
-                if(*value ?= dev->queue_count){
+                if(*value >= dev->queue_count){
                     pr_warn("RELM: virtio-mmio: '%s': QueueSel=%u out of "
                             "range (queue_count=%u)\n",
                             dev->name, *value, dev->queue_count);
@@ -240,8 +243,8 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
             vq = &dev->queues[sel->queue_sel]; 
 
             if(is_write){
-                if(!value == 0){
-                    vq->ready = false; 
+                if(*value == 0){
+                    vq->ready = false;
                     PDEBUG("RELM: virtio-mmio: '%s': queue %u marked "
                            "not-ready by guest\n", dev->name, sel->queue_sel);
                 }else{
@@ -258,7 +261,7 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
                     }
                 }
             }else {
-                *value == vq->ready ? 1 : 0; 
+                *value = vq->ready ? 1 : 0;
             }
             return; 
         }
@@ -267,7 +270,7 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
          * new buffers are availbale in the avail ring */ 
         case VIRTIO_MMIO_QUEUE_NOTIFY_OFF:
             if(is_write){
-                int processed = dev->ops->notify(dev, *value); 
+                int processed = dev->ops->queue_notify(dev, *value);
                 if (processed < 0) {
                     pr_err("RELM: virtio-mmio: '%s': queue_notify failed: "
                            "%d\n", dev->name, processed);
@@ -284,9 +287,9 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
 
         /*return bitmaksk pending interrupts
          * bit 0 = used buffer notification*/ 
-        case VIRTIO_MMIO_INTERRUPT_STATUS_OFF;
+        case VIRTIO_MMIO_INTERRUPT_STATUS_OFF:
             if(!is_write)
-                *value = dev->isr 
+                *value = dev->isr;
             return;
 
         /*guest writes bits to acknowledge interrupts
@@ -298,7 +301,7 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
 
         /*device status*/ 
         case VIRTIO_MMIO_STATUS_OFF:
-            if(write){
+            if(is_write){
                 dev->status = (uint8_t)*value; 
 
                 if (*value == 0 || (*value & VIRTIO_CONFIG_S_FAILED)) {
@@ -327,7 +330,7 @@ void relm_virtio_mmio_register_access_locked(struct relm_virtio_device *dev,
                                         "(status=0x%x)\n", dev->name, *value);
                 }
 
-                if(dev->opd->status_changed)
+                if(dev->ops->status_changed)
                     dev->ops->status_changed(dev, (uint8_t)*value);
 
             }else{
@@ -422,7 +425,7 @@ void relm_virtio_mmio_register_access(struct relm_virtio_device *dev,
     spin_lock(&dev->reg_lock);
     relm_virtio_mmio_register_access_locked(dev, offset, is_write, 
                                             value, need_irq); 
-    spin_unlock(%dev->reg_lock); 
+    spin_unlock(&dev->reg_lock);
 }
 
 

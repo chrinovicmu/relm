@@ -5,10 +5,17 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
-#include <include/vmx_ops.h>
-#include <include/vmcs.h>
-#include <include/ept.h> 
-#include <include/apic.h>
+#include <vmx_ops.h>
+#include <vmcs.h>
+#include <ept.h>
+#include <apic.h>
+
+/*
+ * The authoritative 'struct vcpu' lives in <relm/vcpu.h>; the VMX-specific
+ * fields it embeds live in 'struct vcpu_arch' (<arch/x86/vmx/vcpu_arch.h>).
+ * This header only needs the tag to declare prototypes taking 'struct vcpu *'.
+ */
+struct vcpu;
 
 #define VPID_TO_INDEX(vpid) ((vpid) -1)
 #define INDEX_TO_VPID(index) ((index) + 1)
@@ -18,7 +25,9 @@
 #define HOST_STACK_ORDER    2  
 #define HOST_STACK_SIZE     (PAGE_SIZE << HOST_STACK_ORDER) // 16 KB
 
-#define RELM_MAX_MANAGED_MSRS   8 
+/* RELM_MAX_MANAGED_MSRS is defined authoritatively in <arch/x86/vmx/vcpu_arch.h>
+ * (value 16). It was previously duplicated here as 8, which collided with that
+ * definition (redefinition error) since vcpu_arch.h includes this header. */
 #define RELM_CR3_MAX_TARGETS    4
 #define RELM_CR3_CACHE_SIZE     16 
 #define RELM_CR3_PROMOTE_THRESHOLD 10 
@@ -66,126 +75,14 @@ struct cr3_shadow_cache
 
 struct relm_vm;  // forward declaration
 
-struct vcpu_stats
-{
-    uint64_t total_exits; 
-    uint64_t hypercalls; 
-    uint64_t hlt_exits;
-    uint64_t cpuid_exits;
-    uint64_t start_time_ns; 
-    uint64_t end_time_ns; 
-
-}; 
-/* Guest registers */
-struct guest_regs {
-
-    unsigned long rax;
-    unsigned long rbx;
-    unsigned long rcx;
-    unsigned long rdx;
-    unsigned long rsi;    
-    unsigned long rdi;    
-    unsigned long rbp;    
-    unsigned long rsp;
-    
-    unsigned long r8;
-    unsigned long r9;
-    unsigned long r10;
-    unsigned long r11;
-    unsigned long r12;
-    unsigned long r13;
-    unsigned long r14;
-    unsigned long r15;
-
-    unsigned long rip;
-    unsigned long rflags;
-
-    unsigned long cs, ds, es, fs, gs, ss;
-
-    unsigned long fs_base;
-    unsigned long gs_base;
-} __attribute__((packed));
-
-enum vcpu_state {
-    VCPU_STATE_UNINITIALIZED, 
-    VCPU_STATE_INITIALIZED, 
-    VCPU_STATE_RUNNING, 
-    VCPU_STATE_HALTED, 
-    VCPU_STATE_STOPPED, 
-    VCPU_STATE_SHUTDOWN, 
-    VCPU_STATE_ERROR
-}; 
-
-/* Virtual CPU structure */
-struct vcpu {
-
-    struct relm_vm *vm;
-    struct host_cpu *hcpu;
-
-    uint16_t vpid;
-    int target_cpu_id;  
-
-    int launched; 
-    enum vcpu_state state; 
-    bool halted;
-
-    struct virt_apic apic; 
-
-    spinlock_t lock; 
-    wait_queue_head_t wq; 
-
-    struct task_struct *host_task; 
-
-    void *host_stack; 
-    uint64_t host_rsp; 
-
-    uint64_t vmentry_host_rsp; 
-    struct vmcs_region *vmcs;
-    uint64_t vmcs_pa;
-
-    struct vmx_exec_ctrls controls; 
-
-    void *msr_bitmap;
-    uint64_t msr_bitmap_pa; 
-
-    uint8_t *io_bitmap;
-    uint64_t io_bitmap_pa;
-
-    uint32_t exception_bitmap; 
-
-    /*MSR managment */ 
-    struct msr_entry *vmexit_store_area; 
-    uint64_t vmexit_store_pa;
-
-    struct msr_entry *vmexit_load_area; 
-    uint64_t vmexit_load_pa; 
-
-    struct msr_entry *vmentry_load_area; 
-    uint64_t vmentry_load_pa;
-
-    uint32_t msr_indices[RELM_MAX_MANAGED_MSRS]; 
-    uint32_t msr_count; 
-
-    size_t vmexit_count;
-    size_t vmentry_count; 
-
-    struct guest_regs regs;
-
-    unsigned long cr0, cr3, cr4, cr8;
-    unsigned long efer;
-
-    uint64_t gdtr_base; 
-    u16 gdtr_limit; 
-
-    uint64_t idtr_base; 
-    u16 idtr_limit; 
-
-    uint64_t exit_reason;
-    uint64_t exit_qualification;
-    struct cr3_shadow_cache cr3_cache;
-    struct vcpu_stats stats; 
-
-};
+/*
+ * NOTE: 'struct vcpu_stats', 'struct guest_regs', 'enum vcpu_state' and the
+ * flat 'struct vcpu' used to be defined here. They were pre-refactor
+ * duplicates of the authoritative definitions in <relm/vcpu.h> and
+ * <arch/x86/vmx/vcpu_arch.h>, and collided with them (this header is included
+ * by vcpu_arch.h). They have been removed; all VMX-specific per-vCPU fields now
+ * live in 'struct vcpu_arch' (accessed as vcpu->arch.*).
+ */
 
 struct host_cpu
 {

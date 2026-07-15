@@ -27,24 +27,7 @@ struct relm_vm;
 #define FW_CFG_FILE_DIR         0x0019 
 #define FW_CFG_FILE_FIRST       0x8000
 
-#define FW_CFG_SIGNATURE        0x0000
-#define FW_CFG_ID               0x0001
-#define FW_CFG_UUID             0x0002
-#define FW_CFG_RAM_SIZE         0x0003
-#define FW_CFG_NOGRAPHIC        0x0004
-#define FW_CFG_NB_CPUS          0x0005
-#define FW_CFG_MACHINE_ID       0x0006
-#define FW_CFG_KERNEL_ADDR      0x0007
-#define FW_CFG_KERNEL_SIZE      0x0008
-#define FW_CFG_KERNEL_DATA      0x0009  // Fix: Data is 0x09
-#define FW_CFG_KERNEL_CMDLINE   0x000A  // Fix: Cmdline shifts to 0x0A
-#define FW_CFG_INITRD_ADDR      0x000B  // Fix: Initrd Addr shifts to 0x0B
-#define FW_CFG_INITRD_SIZE      0x000C  // Fix: Initrd Size shifts to 0x0C
-#define FW_CFG_BOOT_DEVICE      0x000D
-#define FW_CFG_NUMA             0x000E
-#define FW_CFG_BOOT_MENU        0x000F
-#define FW_CFG_MAX_CPUS         0x0010
-struct fw_cfg_file 
+struct fw_cfg_file
 {
     uint32_t size; 
     uint16_t select;

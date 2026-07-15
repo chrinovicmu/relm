@@ -14,11 +14,11 @@
 #include <linux/string.h>     
 #include <linux/mm.h>         
  
-#include <include/vmx.h>          
-#include <include/vm.h>           
-#include <include/vmx_ops.h>    
-#include <include/ept.h>          
-#include <include/vmexit.h>       
+#include <vmx.h>
+#include <relm/vm.h>
+#include <vmx_ops.h>
+#include <ept.h>
+#include <vmexit.h>
 #include <include/firmware/fw_cfg.h>
 #include <include/firmware/e820.h>
 #include <include/firmware/seabios.h>
@@ -73,7 +73,7 @@ int relm_seabios_load(struct relm_vm *vm, struct device *dev)
     release_firmware(fw); 
     fw = NULL; 
 
-    vm->fw_data->seabios_hva = seabios_va; 
+    vm->fw_data->seabios_hva = (uint64_t)(uintptr_t)seabios_va;
     vm->fw_data->seabios_hpa = seabios_pa; 
 
     /*map seabios into guest GPA */ 
@@ -104,7 +104,7 @@ void relm_seabios_unload(struct relm_vm *vm)
     {
         free_pages((unsigned long)vm->fw_data->seabios_hva,
                    get_order(SEABIOS_SIZE));
-        vm->fw_data->seabios_hva = NULL;
+        vm->fw_data->seabios_hva = 0;
         vm->fw_data->seabios_hpa = 0;
  
         pr_info("RELM: SeaBIOS: ROM pages freed\n");

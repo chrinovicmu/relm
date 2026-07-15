@@ -7,14 +7,14 @@
 #include <asm/io.h>
 #include <asm/msr.h>
 
-#include <include/vmx.h>
-#include <include/vm.h>
-#include <include/ept.h> 
-#include <include/vmx_ops.h>
-#include <include/vmexit.h>
-#include <include/vmcs_state.h>
-#include <include/virtio/virtio.h> 
-#include <include/virtio/mmio.h> 
+#include <vmx.h>
+#include <relm/vm.h>
+#include <ept.h>
+#include <vmx_ops.h>
+#include <vmexit.h>
+#include <vmcs_state.h>
+#include <virtio/virtio.h>
+#include <virtio/mmio.h>
 #include <utils/utils.h>
 
 
@@ -38,10 +38,12 @@ static int vmx_mem_map_page(struct relm_vm *vm,
     if (flags & RELM_MEM_F_EXEC)  
         ept_flags |= EPT_ACCESS_EXEC;
 
-    if (flags & RELM_MEM_F_MMIO)  
+    if (flags & RELM_MEM_F_MMIO)
         ept_flags |= EPT_MEMTYPE_UC | EPT_IGNORE_PAT;
+    else
+        ept_flags |= EPT_MEMTYPE_WB;
 
-    return relm_ept_map_page(vm->arch.ept, gpa, hpa, ept_flags); 
+    return relm_ept_map_page(vm->arch.ept, gpa, hpa, ept_flags);
 }
 
 static void vmx_mem_unmap_page(struct relm_vm *vm, uint64_t gpa)
@@ -51,7 +53,7 @@ static void vmx_mem_unmap_page(struct relm_vm *vm, uint64_t gpa)
 
 static int vmx_mem_create_guest_page_tables(struct relm_vm *vm)
 {
-    return relm_ept_create_guest_page_tables_vmx(vm);
+    return relm_ept_create_guest_page_tables(vm);
 }
 
 static void vmx_mem_invalidate(struct relm_vm *vm)
@@ -156,7 +158,7 @@ int relm_setup_ept(struct relm_vm *vm)
     {
         int err = PTR_ERR(vm->arch.ept); 
         vm->arch.ept = NULL; 
-        pr_err("RELM: Failed to create EPT context: %d\n"); 
+        pr_err("RELM: Failed to create EPT context: %d\n", err);
         return err; 
     }
 
@@ -168,8 +170,8 @@ int relm_setup_ept(struct relm_vm *vm)
 
 int relm_handle_ept_violation(struct relm_vm *vm)
 {
-    if(!vm || vm->arch.ept)
-        return -ENAVAIL; 
+    if(!vm || !vm->arch.ept)
+        return -ENAVAIL;
 
     uint64_t exit_qualification;
     uint64_t gpa; 
@@ -199,7 +201,6 @@ int relm_handle_ept_violation(struct relm_vm *vm)
     return -EFAULT; 
 }
 
-bool relm_virtio_mmio_handle
 int relm_vcpu_handle_ept_misconfig(struct relm_vm *vm)
 {
     uint64_t gpa; 
@@ -285,7 +286,7 @@ static void relm_ept_free_table(void *table_va, int level)
         relm_ept_free_table(child_va, level - 1); 
     }
 
-    free_page((unsigned)table_va);
+    free_page((unsigned long)table_va);
 }
 
 void relm_ept_context_destroy(struct ept_context *ept)
@@ -309,7 +310,7 @@ void relm_ept_context_destroy(struct ept_context *ept)
 static inline void *relm_ept_alloc_table(void)
 {
     void *table = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO); 
-    if(_unlikely(!table))
+    if(unlikely(!table))
     {
         pr_err("RELM: Failed to alloc EPT table\n");
         return NULL; 
@@ -418,7 +419,7 @@ int relm_ept_map_page(struct ept_context *ept, uint64_t gpa,
         ept->stats.total_mapped += EPT_PAGE_SIZE_4KB; 
     }
     
-    *leaf_entry = (hpa & EPT_ADDR_MASK) | flags | EPT_MEMTYPE_WB;
+    *leaf_entry = (hpa & EPT_ADDR_MASK) | flags;
 
     spin_unlock_irqrestore(&ept->lock, irq_flags); 
 
@@ -560,7 +561,7 @@ int relm_ept_create_guest_page_tables(struct relm_vm *vm)
     /* allocate 3 pages for page tables (PML4, PDPT, PD)
     * from guest RAM at a high address to avoid conflicts */ 
     
-    uint64_t pt_base_gpa = vm->total_guest_ram - (3 * PAGE_SIZE);
+    uint64_t pt_base_gpa = vm->memory.total_guest_ram - (3 * PAGE_SIZE);
     
     pr_info("RELM: Creating guest page tables at GPA 0x%llx\n", pt_base_gpa);
     
@@ -584,9 +585,9 @@ int relm_ept_create_guest_page_tables(struct relm_vm *vm)
     pd_gpa = pt_base_gpa + (2 * PAGE_SIZE);
     
     /* map them in EPT */ 
-    relm_ept_map_page(vm->arch.ept, pml4_gpa, pml4_hpa, EPT_RWX);
-    relm_ept_map_page(vm->arch.ept, pdpt_gpa, pdpt_hpa, EPT_RWX);
-    relm_ept_map_page(vm->arch.ept, pd_gpa, pd_hpa, EPT_RWX);
+    relm_ept_map_page(vm->arch.ept, pml4_gpa, pml4_hpa, EPT_RWX | EPT_MEMTYPE_WB);
+    relm_ept_map_page(vm->arch.ept, pdpt_gpa, pdpt_hpa, EPT_RWX | EPT_MEMTYPE_WB);
+    relm_ept_map_page(vm->arch.ept, pd_gpa, pd_hpa, EPT_RWX | EPT_MEMTYPE_WB);
     
     pml4 = page_address(pml4_page);
     pdpt = page_address(pdpt_page);

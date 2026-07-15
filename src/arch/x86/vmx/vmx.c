@@ -15,14 +15,15 @@
 #include <asm/io.h>
 #include <asm/desc.h> 
 
-#include <include/vmx.h>
-#include <include/vm.h>
-#include <include/ept.h>
-#include <include/vmx_ops.h>
-#include <include/vmexit.h>
-#include <include/apic.h>
-#include <include/vmcs_state.h>
-#include <include/boot/linux_loader.h> 
+#include <vmx.h>
+#include <relm/vm.h>
+#include <relm/vcpu.h>
+#include <ept.h>
+#include <vmx_ops.h>
+#include <vmexit.h>
+#include <apic.h>
+#include <vmcs_state.h>
+#include <include/boot/arch/x86/loader.h>
 #include <include/firmware/seabios.h>
 #include <utils/utils.h>
 
@@ -84,8 +85,6 @@ static inline bool relm_vcpu_msr_bitmap_enabled(struct vcpu *vcpu);
 static inline bool relm_vcpu_ept_enabled(struct vcpu *vcpu);
 static inline unsigned int msr_area_order(size_t bytes);
 
-/* --- CR3 cache --- */
-static void relm_cr3_cache_apply(struct cr3_shadow_cache *cache);
 
 /* arch ops implementations */
 static int  vmx_vcpu_alloc(struct vcpu *vcpu);
@@ -93,16 +92,25 @@ static int  vmx_vcpu_init(struct vcpu *vcpu);
 static int  vmx_vcpu_run(struct vcpu *vcpu);
 static void vmx_vcpu_free(struct vcpu *vcpu);
 static void vmx_vcpu_destroy(struct vcpu *vcpu);
-static void vmx_dump_regs(struct vcpu *vcpu);
 static int  vmx_add_vcpu(struct relm_vm *vm, int vpid);
 static int  vmx_vm_init(struct relm_vm *vm);
 static void vmx_vm_destroy(struct relm_vm *vm);
 
-static int relm_setup_guest_state(struct vcpu *vcpu);
-static int relm_setup_guest_state_firmware(struct vcpu *vcpu); 
-static int relm_setup_guest_state_longmode(struct vcpu *vcpu); 
+/* arch ops implementations referenced by vmx_vcpu_ops but defined later */
+static int  vmx_setup_mmu(struct vcpu *vcpu);
+static int  vmx_inject_irq(struct vcpu *vcpu, unsigned int irq);
+static int  vmx_read_msr(struct vcpu *vcpu, uint32_t msr, uint64_t *val);
+static int  vmx_write_msr(struct vcpu *vcpu, uint32_t msr, uint64_t val);
+void        relm_dump_vcpu(struct vcpu *vcpu);
 
-extern int vmx_handle_exit(struct vcpu *vcpu);
+static int relm_setup_guest_state(struct vcpu *vcpu);
+static int relm_setup_guest_state_firmware(struct vcpu *vcpu);
+static int relm_setup_guest_state_longmode(struct vcpu *vcpu);
+
+/* Defined in vmx_asm.S: enters the guest via VMLAUNCH/VMRESUME.
+ * RDI = guest register save area, RSI = launched flag; returns 0 on a
+ * normal VM-exit, -1 if VMLAUNCH/VMRESUME itself failed. */
+extern int relm_vmentry_asm(void *guest_regs, int launched);
 
 const uint32_t relm_vmexit_msr_indices[] = {
     MSR_IA32_EFER,
@@ -144,7 +152,7 @@ const struct vcpu_arch_ops vmx_vcpu_ops = {
     .inject_irq   = vmx_inject_irq,
     .read_msr     = vmx_read_msr,
     .write_msr    = vmx_write_msr,
-    .dump_regs    = vmx_dump_regs,
+    .dump_regs    = relm_dump_vcpu,
 };
 
 const struct relm_vm_operations vmx_vm_ops = {
@@ -328,8 +336,8 @@ int relm_vmx_enable_on_all_cpus(void)
 
     if(atomic_read(&work.failed_cpus) > 0)
     {
-        pr_err("RELM: VMX enable failed on %d CPU(s)\n"), 
-               atomic_read(&work.failed_cpus); 
+        pr_err("RELM: VMX enable failed on %d CPU(s)\n",
+               atomic_read(&work.failed_cpus));
         ret = -EIO; 
         goto _cleanup; 
     }
@@ -720,7 +728,7 @@ static int relm_setup_cr_controls(struct vcpu *vcpu)
 static uint32_t relm_get_max_cr3_targets(void)
 {
     uint64_t vmx_misc = __rdmsr1(MSR_IA32_VMX_MISC);
-    return (uint8_t)((vmx_misc >> 16) & 0x1FF); 
+    return (uint32_t)((vmx_misc >> 16) & 0x1FF);
 }
 
 /**
@@ -1248,7 +1256,7 @@ static int vmx_vcpu_alloc(struct vcpu *vcpu)
         return -ENOMEM;
     }
 
-    vcpu->arch.launched    = 0;
+    vcpu->launched         = 0;
     vcpu->arch.regs.rflags = 0x2;   /* architecturally reserved bit 1 */
     vcpu->arch.regs.rip    = 0x0;
 
@@ -1465,12 +1473,12 @@ static int vmx_vcpu_run(struct vcpu *vcpu)
 {
     int ret;
 
-    ret = relm_vmentry_asm(&vcpu->arch.regs, vcpu->arch.launched);
+    ret = relm_vmentry_asm(&vcpu->arch.regs, vcpu->launched);
 
     if (ret != 0) {
         pr_err("RELM: VCPU%d: VM-%s failed\n",
                vcpu->vpid,
-               vcpu->arch.launched ? "RESUME" : "LAUNCH");
+               vcpu->launched ? "RESUME" : "LAUNCH");
         pr_err("RELM: VCPU%d: instruction error: %llu\n",
                vcpu->vpid,
                __vmread(VMCS_INSTRUCTION_ERROR_FIELD));
@@ -1478,8 +1486,8 @@ static int vmx_vcpu_run(struct vcpu *vcpu)
     }
 
     /* Mark as launched after the first successful entry. */
-    if (!vcpu->arch.launched) {
-        vcpu->arch.launched = 1;
+    if (!vcpu->launched) {
+        vcpu->launched = 1;
         PDEBUG("RELM: VCPU%d: first VM-exit, switching to VMRESUME\n",
                vcpu->vpid);
     }
@@ -1542,19 +1550,25 @@ static int vmx_setup_mmu(struct vcpu *vcpu)
 }
 
 /*
- * vmx_inject_irq — inject a virtual interrupt into the guest.
+ * vmx_inject_irq — deliver a platform IRQ line to the guest.
  *
- * Uses the VM-entry interrupt-information field. The interrupt is delivered
- * on the next VM-entry if the guest's RFLAGS.IF is set (for external interrupts)
- * or unconditionally (for NMIs / exceptions depending on type).
+ * Translates the line to an APIC vector (PIC-style remap above the exception
+ * range — raw line numbers land in vectors 0-31, which are architecturally
+ * illegal in the IRR) and sets it pending in the vCPU's virtual APIC, waking
+ * the vCPU if it is halted.
  *
- * TODO: implement using VMCS VM_ENTRY_INTR_INFO_FIELD.
+ * TODO: emulate an IOAPIC so the guest programs the routing (target vCPU,
+ * vector, polarity) instead of this fixed translation.
  */
-static int vmx_inject_irq(struct vcpu *vcpu, unsigned int vector)
+static int vmx_inject_irq(struct vcpu *vcpu, unsigned int irq)
 {
-    (void)vcpu;
-    (void)vector;
-    return -ENOSYS;
+    unsigned int vector = RELM_IRQ_VECTOR_BASE + irq;
+
+    if (vector > 255)
+        return -EINVAL;
+
+    relm_apic_inject_interrupt(&vcpu->arch.apic, (uint8_t)vector, false);
+    return 0;
 }
 
 /*
@@ -1657,12 +1671,13 @@ static int relm_setup_host_state(struct vcpu *vcpu)
     CHECK_VMWRITE(HOST_RSP, vcpu->arch.host_rsp);
     CHECK_VMWRITE(HOST_RIP, (uint64_t)relm_vmexit_handler);
 
-    /* Segment selectors (must be valid) 
-     * masking with 0xF8 ensures bottom 3 bits (RPL and TI) are 0*/
-    CHECK_VMWRITE(HOST_CS_SELECTOR, __KERNEL_CS & 0xF8);
-    CHECK_VMWRITE(HOST_SS_SELECTOR, __KERNEL_DS & 0xF8);
-    CHECK_VMWRITE(HOST_DS_SELECTOR, __KERNEL_DS & 0xF8);
-    CHECK_VMWRITE(HOST_ES_SELECTOR, __KERNEL_DS & 0xF8);
+    /* Segment selectors (must be valid)
+     * masking with 0xFFF8 clears the bottom 3 bits (RPL and TI) while
+     * preserving the selector index bits 3-15 */
+    CHECK_VMWRITE(HOST_CS_SELECTOR, __KERNEL_CS & 0xFFF8);
+    CHECK_VMWRITE(HOST_SS_SELECTOR, __KERNEL_DS & 0xFFF8);
+    CHECK_VMWRITE(HOST_DS_SELECTOR, __KERNEL_DS & 0xFFF8);
+    CHECK_VMWRITE(HOST_ES_SELECTOR, __KERNEL_DS & 0xFFF8);
     CHECK_VMWRITE(HOST_FS_SELECTOR, 0);
     CHECK_VMWRITE(HOST_GS_SELECTOR, 0);
     
@@ -1728,7 +1743,13 @@ static int relm_setup_host_state(struct vcpu *vcpu)
     /* EFER must be set */
     CHECK_VMWRITE(HOST_IA32_EFER, __rdmsr1(MSR_EFER));
 
-    return 0; 
+    /* HOST_IA32_PAT: VM_EXIT_LOAD_IA32_PAT is enabled, so on every VM-exit
+     * the CPU reloads IA32_PAT from this VMCS field. If we leave it 0 the
+     * whole PAT becomes Uncacheable and the host hangs after the first exit.
+     * Preserve the host's real PAT so host caching is unchanged. */
+    CHECK_VMWRITE(HOST_IA32_PAT, __rdmsr1(MSR_IA32_CR_PAT));
+
+    return 0;
 }
 
 static int relm_setup_guest_state(struct vcpu *vcpu)
@@ -1930,12 +1951,36 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
         pr_err("RELM: VCPU%d: longmode: vm->pml4_gpa not set\n", vcpu->vpid);
         return -EINVAL;
     }
-    CHECK_VMWRITE(GUEST_CR3, vcpu->vm->pml4_gpa);
+    CHECK_VMWRITE(GUEST_CR3, vcpu->vm->arch.pml4_gpa);
     vcpu->arch.cr3 = vcpu->vm->arch.pml4_gpa;
 
     efer = EFER_LME | EFER_LMA | EFER_SCE;
     CHECK_VMWRITE(GUEST_IA32_EFER, efer);
     vcpu->arch.efer = efer;
+
+    /* Guest CR0/CR4 for 64-bit long mode. Long mode requires CR0.PG, CR0.PE
+     * and CR4.PAE; sanitise against the VMX CR0/CR4 fixed-bit MSRs
+     * (val = (val | fixed0) & fixed1) so the VMCS values are legal. */
+    cr0_fixed0 = __rdmsr1(MSR_IA32_VMX_CR0_FIXED0);
+    cr0_fixed1 = __rdmsr1(MSR_IA32_VMX_CR0_FIXED1);
+    cr4_fixed0 = __rdmsr1(MSR_IA32_VMX_CR4_FIXED0);
+    cr4_fixed1 = __rdmsr1(MSR_IA32_VMX_CR4_FIXED1);
+
+    cr0 = X86_CR0_PG | X86_CR0_PE | X86_CR0_NE | X86_CR0_WP;
+    cr0 = (cr0 | cr0_fixed0) & cr0_fixed1;
+
+    cr4 = X86_CR4_PAE;
+    cr4 = (cr4 | cr4_fixed0) & cr4_fixed1;
+
+    CHECK_VMWRITE(GUEST_CR0, cr0);
+    CHECK_VMWRITE(GUEST_CR4, cr4);
+    vcpu->arch.cr0 = cr0;
+    vcpu->arch.cr4 = cr4;
+
+    /* VM_ENTRY_LOAD_GUEST_PAT is enabled, so the CPU loads IA32_PAT from this
+     * VMCS field on entry. A 0 here would make all guest memory Uncacheable.
+     * Use the host's PAT so guest caching matches the reset default. */
+    CHECK_VMWRITE(GUEST_IA32_PAT, __rdmsr1(MSR_IA32_CR_PAT));
 
     CHECK_VMWRITE(GUEST_CS_SELECTOR, 0x0008);
     CHECK_VMWRITE(GUEST_CS_BASE, 0);
@@ -1988,7 +2033,7 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     CHECK_VMWRITE(GUEST_IDTR_LIMIT, RELM_GUEST_IDT_SIZE - 1U);
 
     /*RIP = startup_64 gpa*/ 
-    entry_rip = vcpu->vm->kernel_entry_gpa; 
+    entry_rip = vcpu->vm->arch.kernel_entry_gpa;
     if(!entry_rip)
     {
         pr_err("RELM: VCPU%d: longmode: vm->kernel_entry_gpa not set "
@@ -2007,7 +2052,7 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     }
 
     /*stack starts at the top of usabe RAM, below page table pages*/ 
-    CHECK_VMWRITE(GUEST_RSP, (vcpu->vm->total_guest_ram - (3 * PAGE_SIZE)) & ~0xFULL);
+    CHECK_VMWRITE(GUEST_RSP, (vcpu->vm->memory.total_guest_ram - (3 * PAGE_SIZE)) & ~0xFULL);
     
     /*only reserved bit set*/ 
     CHECK_VMWRITE(GUEST_RFLAGS, 0x2ULL);
@@ -2035,7 +2080,7 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
 
 void relm_cr3_cache_init(struct cr3_shadow_cache *cache)
 {
-    memset(cache, 0, sizeof(cache)); 
+    memset(cache, 0, sizeof(*cache));
     spin_lock_init(&cache->lock); 
     pr_info("RELM: CR3 cache: initialised (candidates=%u slots, max_targets=%u)\n",
             RELM_CR3_CACHE_SIZE, RELM_CR3_MAX_TARGETS);
@@ -2332,13 +2377,13 @@ int relm_cr3_cache_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
     uint64_t new_cr3;
     uint64_t instr_len;
     uint64_t guest_rip;
- 
+/* 
     const uint64_t *gpr_table[] = {
         &vcpu->arch.regs.rax,
         &vcpu->arch.regs.rcx,
         &vcpu->arch.regs.rdx,
         &vcpu->arch.regs.rbx,
-        &vcpu->arch.regs.rsp,   /* guest RSP — distinct from host RSP */
+        &vcpu->arch.regs.rsp,   
         &vcpu->arch.regs.rbp,
         &vcpu->arch.regs.rsi,
         &vcpu->arch.regs.rdi,
@@ -2351,7 +2396,7 @@ int relm_cr3_cache_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
         &vcpu->arch.regs.r14,
         &vcpu->arch.regs.r15,
     };
- 
+ */ 
     /* Bounds-check src_reg. Values 0–15 are valid (4 bits from hardware).
      * A value outside this range would indicate a hardware bug or memory
      * corruption. We guard defensively. */
@@ -2364,9 +2409,10 @@ int relm_cr3_cache_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
         _vmwrite(GUEST_RIP, guest_rip + instr_len);
         return 1;
     }
+
  
-    new_cr3 = *gpr_table[src_reg];
- 
+    new_cr3 = guest_reg_read(&vcpu->arch.regs,(int)src_reg); 
+
     PDEBUG("RELM: CR3 exit: CR3=0x%llx from GPR%u (total exits=%llu)\n",
            new_cr3, src_reg, vcpu->arch.cr3_cache.total_cr3_exits + 1);
  
@@ -2421,7 +2467,7 @@ void relm_cr3_cache_dump(const struct cr3_shadow_cache *cache)
     }
 }
  
-void vmx_dump_vcpu(struct vcpu *vcpu)
+void relm_dump_vcpu(struct vcpu *vcpu)
 {
     pr_info("\n*** Guest State ***\n\n");     
 

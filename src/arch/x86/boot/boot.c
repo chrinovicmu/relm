@@ -9,7 +9,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 
-#include <include/vm.h>
+#include <relm/vm.h>
 #include <include/boot/linux_loader.h>
 #include <include/boot/arch/x86/loader.h> 
 #include <include/firmware/e820.h>
@@ -141,10 +141,10 @@ int relm_kernel_load(struct relm_vm *vm,
 
     /* Sanity: don't run off the end of guest RAM, and make sure we're inside
      * the region the page tables identity-map (first 1 GiB). */
-    if(load_gpa + pm_kernel_size > vm->total_guest_ram)
+    if(load_gpa + pm_kernel_size > vm->memory.total_guest_ram)
     {
         pr_err("RELM: linux_loader: kernel @0x%llx+%llu exceeds guest RAM %llu\n",
-               load_gpa, pm_kernel_size, vm->total_guest_ram);
+               load_gpa, pm_kernel_size, vm->memory.total_guest_ram);
         ret = -ENOMEM;
         goto _out_release;
     }
@@ -207,7 +207,7 @@ int relm_initrd_load(struct relm_vm *vm,
         goto _out_release;
     }
 
-    if(RELM_INITRD_LOAD_GPA + fw->size > vm->total_guest_ram)
+    if(RELM_INITRD_LOAD_GPA + fw->size > vm->memory.total_guest_ram)
     {
         pr_err("RELM: linux_loader: initrd would overflow guest RAM\n");
         ret = -ENOMEM;
@@ -369,8 +369,8 @@ int relm_boot_params_build(struct relm_vm *vm,
 }
 
 
-int relm_boot_load(struct relm_vm *vm, 
-                   struct device dev, 
+int relm_boot_load(struct relm_vm *vm,
+                   struct device *dev,
                    const struct relm_boot_config *cfg)
 {
     const char *cmdline     = cfg ? cfg->cmdline     : NULL;
@@ -420,7 +420,7 @@ int relm_boot_load(struct relm_vm *vm,
         return ret;
     }
 
-    ret = relm_install_daig_idt_gdt(vm);
+    ret = relm_install_diag_idt_gdt(vm);
     if (ret) {
         pr_err("RELM: x86 boot: GDT/IDT install failed: %d\n", ret);
         return ret;
@@ -517,7 +517,7 @@ static int relm_write_idt_stub(struct relm_vm *vm, unsigned int vec)
     }
 }
 
-int relm_install_daig_idt_gdt(struct relm_vm *vm)
+int relm_install_diag_idt_gdt(struct relm_vm *vm)
 {
     int ret; 
     unsigned int v; 

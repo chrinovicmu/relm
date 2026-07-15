@@ -52,7 +52,7 @@ struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vpid,
 
     vcpu->vm = vm; 
     vcpu->vpid = vpid; 
-    vcpu->state = VCPU_STATE_UNINTIALIZED; 
+    vcpu->state = VCPU_STATE_UNINITIALIZED;
     vcpu->ops = arch_ops; 
 
     spin_lock_init(&vcpu->lock); 
@@ -85,7 +85,7 @@ struct vcpu *relm_vcpu_create(struct relm_vm *vm, int vpid,
     return vcpu;
 
 _out_free_stack:
-    free_pages((unsigned long)vcpu->host_stack, HOST_STACK_ORDER);
+    free_pages((unsigned long)vcpu->host_stack, RELM_HOST_STACK_ORDER);
 _out_free_vcpu:
     kfree(vcpu);
     return ERR_PTR(ret);
@@ -100,7 +100,7 @@ void relm_vcpu_free(struct vcpu *vcpu)
         vcpu->ops->vcpu_free(vcpu);
 
     if (vcpu->host_stack)
-        free_pages((unsigned long)vcpu->host_stack, HOST_STACK_ORDER);
+        free_pages((unsigned long)vcpu->host_stack, RELM_HOST_STACK_ORDER);
 
     kfree(vcpu);
 }
@@ -226,14 +226,30 @@ static int relm_vcpu_loop(void *data)
     PDEBUG("RELM: VCPU%d: running on CPU%d\n",
         vcpu->vpid, smp_processor_id());
 
-    if(!vcpu->ops || !vcpu->ops->init)
+    if(!vcpu->ops || !vcpu->ops->vcpu_init)
     {
         pr_err("RELM: VCPU%d: no vcpu_init op — cannot run\n", vcpu->vpid);
         vcpu->state = VCPU_STATE_ERROR;
         goto _out_clear_vcpu;
     }
 
-    vcpu->state = VCPU_STATE_RUNNING; 
+    /*
+     * Arch Phase 2 — MUST run on the pinned CPU. This is where the VMCS is
+     * made current (VMCLEAR/VMPTRLD) and every host+guest VMCS field is
+     * written. The previous code checked a nonexistent `ops->init` member and
+     * then fell straight into the run loop WITHOUT ever calling it, so VM-entry
+     * executed against a completely unprogrammed VMCS — the guest could never
+     * boot. We now actually invoke vcpu_init and fail cleanly if it errors.
+     */
+    ret = vcpu->ops->vcpu_init(vcpu);
+    if (ret != 0) {
+        pr_err("RELM: VCPU%d: arch vcpu_init (Phase 2 VMCS setup) failed: %d\n",
+               vcpu->vpid, ret);
+        vcpu->state = VCPU_STATE_ERROR;
+        goto _out_arch_destroy;
+    }
+
+    vcpu->state = VCPU_STATE_RUNNING;
 
     while(!kthread_should_stop()){
         

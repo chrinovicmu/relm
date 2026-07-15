@@ -1,3 +1,4 @@
 *.o 
 dummy.c 
 lib/firmware/vmlinux
+include/relm_arch
