@@ -28,7 +28,6 @@
  *               false = guest loads FROM it (mov mem -> reg)
  * op_size:      operand width in bytes (2/4/8) from prefixes: REX.W = 8,
  *               0x66 = 2, default = 4. Decides masking / zero-extension.
- * access_size:  width of the memory access itself (currently mirrors op_size).
  * is_immediate: true when the store carries an immediate operand (e.g.
  *               0xC7 MOV imm32 -> mem) — there is NO source GPR in that case,
  *               so src_reg must not be consulted.
@@ -44,7 +43,6 @@
 struct relm_decoded_insn {
     bool is_write;
     unsigned int op_size;
-    unsigned int access_size; //width of mmeory access
     bool is_immediate;
     uint64_t immediate;
 
@@ -59,7 +57,7 @@ struct relm_decoded_insn {
  * instruction length in bytes (callers use it to advance the guest RIP
  * past the emulated instruction); negative errno on failure
  * (-ENOSYS for opcodes the decoder does not handle).
- */
+  */
 int relm_decode_instruction(const uint8_t *insn_buf, int len,
                             struct relm_decoded_insn *out);
 
