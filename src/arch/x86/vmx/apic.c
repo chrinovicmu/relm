@@ -1249,34 +1249,18 @@ int relm_apic_handle_access(struct vcpu *vcpu)
     struct relm_decoded_insn decoded;
     int ret;
 
-    /* Exit qualification for reason 44 (SDM Vol 3C §27.2.1, table 27-6):
-     * bits 11:0 = offset of the access within the APIC page (i.e. which
-     * register), bits 15:12 = access type (linear read/write/fetch, guest
-     * event delivery, ...). */
     qual = __vmread(VM_EXIT_QUALIFICATION);
     offset = (uint32_t)(qual & APIC_ACCESS_OFFSET_MASK);
     access_type = (uint32_t)((qual & APIC_ACCESS_TYPE_MASK) >> APIC_ACCESS_TYPE_SHIFT);
 
-    /* RIP of the faulting instruction and its length in bytes — the
-     * length is hardware-provided so we know exactly how many bytes to
-     * fetch and how far to advance RIP afterwards. */
     guest_rip = __vmread(GUEST_RIP);
     instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
 
-    PDEBUG("RELM: APIC ACCESS: offset=0x%03x type=%u RIP=0x%llx len=%llu\n",
-           offset, access_type, guest_rip, instr_len);
-
-    /* Fetch the raw instruction bytes from guest memory. Failure here is
-     * fatal for this exit: without the bytes we cannot know what the
-     * guest wanted, and resuming would re-execute the same instruction
-     * and fault forever. */
     ret = relm_vm_copy_from_guest(vcpu->vm, guest_rip, insn_buf, (size_t)instr_len);
     if (ret < 0) {
         pr_err("RELM: APIC: Failed to copy instruction bytes from guest GPA=0x%llx\n", guest_rip);
         return ret;
     }
-    /* Decode into (is_write, op_size, src_reg/dst_reg, immediate) — see
-     * include/relm/decoder.h for the contract. */
     if (relm_decode_instruction(insn_buf, instr_len, &decoded) < 0) {
         pr_err("RELM: APIC: Instruction decoding failed at RIP=0x%llx\n", guest_rip);
         return -EINVAL;
