@@ -43,7 +43,7 @@ static int mmu_walk_long(struct vcpu *vcpu, uint64_t gva, uint64_t *gpa)
     uint64_t entry; 
     int level, ret; 
 
-    for (level = 4; levl >= 1; level--){
+    for (level = 4; level >= 1; level--){
         /* 9 VA bits select 1 of 512 8-byte entries at this level. */
         unsigned int shift = 12 + 9 * (level - 1);
         unsigned int index = (gva >> shift) & 0x1FF;

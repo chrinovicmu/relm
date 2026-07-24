@@ -1243,7 +1243,7 @@ int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
  */
 int relm_apic_handle_access(struct vcpu *vcpu)
 {
-    uint64_t qual, guest_rip, instr_len;
+    uint64_t qual, guest_rip, guest_linear, instr_len;
     uint32_t offset, access_type, value;
     uint8_t insn_buf[15];
     struct relm_decoded_insn decoded;
@@ -1256,11 +1256,15 @@ int relm_apic_handle_access(struct vcpu *vcpu)
     guest_rip = __vmread(GUEST_RIP);
     instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
 
-    ret = relm_vm_copy_from_guest(vcpu->vm, guest_rip, insn_buf, (size_t)instr_len);
+    guest_linear = relm_mmu_rip_to_linear(vcpu, guest_rip); 
+    ret = relm_mmu_copy_from_guest_virt(vcpu, guest_linear, insn_buf, (size_t)instr_len);
     if (ret < 0) {
-        pr_err("RELM: APIC: Failed to copy instruction bytes from guest GPA=0x%llx\n", guest_rip);
+        pr_err("RELM: APIC: Failed to copy instruction bytes from guest "
+               "RIP=0x%llx (linear=0x%llx, err=%d)\n",
+               guest_rip, guest_linear, ret);
         return ret;
     }
+
     if (relm_decode_instruction(insn_buf, instr_len, &decoded) < 0) {
         pr_err("RELM: APIC: Instruction decoding failed at RIP=0x%llx\n", guest_rip);
         return -EINVAL;

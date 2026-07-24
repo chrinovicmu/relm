@@ -226,7 +226,7 @@ bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu,
     struct relm_virtio_device *dev;
     uint8_t insn_buf[16];
     struct relm_decoded_insn decoded;
-    uint64_t guest_rip; 
+    uint64_t guest_rip, guest_linear; 
     unsigned int offset; 
     uint32_t value = 0; 
     bool needs_irq = false; 
@@ -242,15 +242,28 @@ bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu,
     offset = (unsigned int)(fault_gpa - dev->mmio_base_gpa);
     guest_rip = vcpu->arch.regs.rip;
 
-    /* Fetch up to 16 bytes at the guest RIP. Unlike the APIC-access exit,
-     * an EPT violation does not report the instruction length, so we grab
-     * a maximal buffer and let the decoder find the real length. */
-    n = relm_vm_copy_from_guest(vcpu->vm, guest_rip,
-                                insn_buf, sizeof(insn_buf));
+    guest_linear = relm_mmu_rip_to_linear(vcpu, guest_rip); 
+    {
+        size_t first = min(sizeof(insn_buf), 
+                           (size_t)(PAGE_SIZE - 
+                           (guest_linear & ~PAGE_MASK))); 
 
+        n  = relm_mmu_copy_from_guest_virt(vcpu, guest_linear, 
+                                           insn_buf, first); 
+        if(n > 0 && first < sizeof(insn_buf)){
+            int n2 = relm_mmu_copy_from_guest_virt(vcpu, 
+                                                   guest_linear + first, 
+                                                   insn_buf + first, 
+                                                   sizeof(insn_buf) - first); 
+            if(n2 > 0)
+                n += 2; 
+        }
+    }
+    
     if (n < 0) {
         pr_err("RELM: virtio-mmio: VCPU%d: failed to fetch instruction "
-               "bytes at RIP 0x%llx (n=%d)\n", vcpu->vpid, guest_rip, n);
+               "bytes at RIP 0x%llx (linear 0x%llx, n=%d)\n",
+               vcpu->vpid, guest_rip, guest_linear, n);
         /* Returning true here would VMRESUME at the same RIP and re-fault
          * forever; report unhandled so the caller stops the vCPU. */
         return false;
