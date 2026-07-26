@@ -189,4 +189,10 @@ static_assert(offsetof(struct vmcb_save_area, g_pat) == 0x268);
 static_assert(offsetof(struct vmcb, save) == VMCB_SAVE_AREA_OFFSET);
 static_assert(sizeof(struct vmcb) == VMCB_SIZE);
 
+/*tlb control */ 
+#define TLB_CONTROL_DO_NOTHING          0 
+#define TLB_CONTROL_FLUSH_ALL_ASIDS     1
+#define TLB_CONTROL_FLUSH_ASID          3 /*this vmcb */ 
+#define TLB_CONTROL_SLUSH_ASID_LOCAL    7 /*this ASID, non-global only */ 
+
 
