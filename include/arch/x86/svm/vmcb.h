@@ -132,7 +132,7 @@ struct vmcb_save_area {
     * The other 14 GPRs have no field anywhere in the VMCB (tier 3).
     */
     u64 rax; /* 0x1F8 */
-     u64 star;           /* 0x200 */
+    u64 star;           /* 0x200 */
     u64 lstar;          /* 0x208 */
     u64 cstar;          /* 0x210 */
     u64 sfmask;         /* 0x218 */
@@ -195,4 +195,15 @@ static_assert(sizeof(struct vmcb) == VMCB_SIZE);
 #define TLB_CONTROL_FLUSH_ASID          3 /*this vmcb */ 
 #define TLB_CONTROL_SLUSH_ASID_LOCAL    7 /*this ASID, non-global only */ 
 
+/* int_ctl (0x060) — virtual-interrupt block */
+#define V_TPR_MASK          0xFFu     /* bits 7:0            */
+#define V_IRQ               (1u << 8)      /* virtual INTR pending*/
+#define V_INTR_PRIO_SHIFT   16 /* bits 19:16          */
+#define V_INTR_PRIO_MASK    (0xFu << V_INTR_PRIO_SHIFT)
+#define V_IGN_TPR           (1u << 20) /* deliver despite TPR */
+#define V_INTR_MASKING      (1u << 24) /* host EFLAGS.IF/CR8*/ 
+#define AVIC_ENABLE         (1u << 31)
+
+/* int_vector (0x064) */
+#define V_INTR_VECTOR_MASK 0xFFu /* bits 7:0*/
 
