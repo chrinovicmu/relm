@@ -7,6 +7,9 @@
 #include <asm/msr.h>         
 
 #include <svm.h>
+#include <svm_ops.h> 
+#include <include/firmware/seabios.h>    
+#include <include/boot/arch/x86/loader.h>
 #include <utils/utils.h>
 
 bool relm_svm_check_support(void)
@@ -606,6 +609,153 @@ void relm_free_vcpu(struct vcpu *vcpu)
 
     PDEBUG("RELM: VCPU%d: SVM allocations freed\n", vcpu->vpid);
 }
+
+
+static int svm_vcpu_init(struct vcpu *vcpu)
+{
+    int ret; 
+
+    if (!vcpu || !vcpu->arch.hsave_pa)
+        return -EINVAL;
+
+    wrmsrl(MSR_VM_HSAVE_PA, vcpu->arch.hsave_pa); 
+
+    ret = relm_vcpu_vmcb_setup(vcpu);
+    if (ret != 0) {
+        pr_err("RELM: VCPU%d: VMCB control-area setup failed: %d\n",
+               vcpu->vpid, ret);
+        return ret;
+    }
+
+    ret = relm_init_vmcb_state(vcpu);
+    if (ret != 0) {
+        pr_err("RELM: VCPU%d: VMCB guest-state init failed: %d\n",
+               vcpu->vpid, ret);
+        return ret;
+    }
+
+    pr_info("RELM: VCPU%d: SVM Phase 2 complete on CPU%d "
+            "(hsave_pa=0x%llx)\n",
+            vcpu->vpid, smp_processor_id(), vcpu->arch.hsave_pa);
+    return 0;
+
+}
+
+static int svm_vcpu_run(struct vcpu *vcpu)
+{
+    pr_err("RELM: VCPU%d: svm_vcpu_run: no VMRUN assembly yet "
+           "(svm_asm.S not written) — cannot enter guest\n",
+           vcpu ? vcpu->vpid : -1);
+    return -ENOSYS;
+}
+
+static void svm_vcpu_destroy(struct vcpu *vcpu)
+{
+    (void)vcpu;
+}
+
+static int svm_setup_mmu(struct vcpu *vcpu)
+{
+    (void)vcpu;
+    return 0;
+}
+
+static int svm_inject_irq(struct vcpu *vcpu, unsigned int irq)
+{
+    (void)irq;
+    pr_err("RELM: VCPU%d: svm_inject_irq: no APIC emulation yet "
+           "(apic.c not written)\n", vcpu ? vcpu->vpid : -1);
+    return -ENOSYS;
+}
+
+static int svm_read_msr(struct vcpu *vcpu, uint32_t msr, uint64_t *val)
+{
+    (void)vcpu;
+    (void)msr;
+    (void)val;
+    return -EINVAL;
+}
+
+static int svm_write_msr(struct vcpu *vcpu, uint32_t msr, uint64_t val)
+{
+    (void)vcpu;
+    (void)msr;
+    (void)val;
+    return -EINVAL;
+}
+
+const struct vcpu_arch_ops svm_vcpu_ops = {
+    .vcpu_alloc   = relm_vcpu_alloc_init,
+    .vcpu_init    = svm_vcpu_init,
+    .vcpu_run     = svm_vcpu_run,        
+    .handle_exit  = relm_svm_handle_exit, 
+                                           
+    .vcpu_free    = relm_free_vcpu,
+    .vcpu_destroy = svm_vcpu_destroy,
+    .setup_mmu    = svm_setup_mmu,
+    .inject_irq   = svm_inject_irq,     
+    .read_msr     = svm_read_msr,
+    .write_msr    = svm_write_msr,
+    .dump_regs    = relm_dump_vcpu,
+};
+
+static int svm_add_vcpu(struct relm_vm *vm, int vpid)
+{
+    struct vcpu *vcpu;
+
+    if (!vm)
+        return -EINVAL;
+
+    if (vpid < 0 || vpid >= vm->max_vcpus) {
+        pr_err("RELM: SVM: vpid %d out of range (max_vcpus=%d)\n",
+               vpid, vm->max_vcpus);
+        return -EINVAL;
+    }
+
+    vcpu = relm_vcpu_create(vm, vpid, &svm_vcpu_ops);
+    if (IS_ERR(vcpu)) {
+        pr_err("RELM: SVM: relm_vcpu_create failed for VPID%d: %ld\n",
+               vpid, PTR_ERR(vcpu));
+        return PTR_ERR(vcpu);
+    }
+
+    vcpu->target_cpu_id = HOST_CPU_ID;
+    vm->vcpus[vpid] = vcpu;
+    vm->online_vcpus++;
+
+    pr_info("RELM: SVM: VCPU%d added to VM%d (target CPU%d)\n",
+            vpid, vm->vm_id, vcpu->target_cpu_id);
+
+    return 0;
+}
+
+extern int relm_svm_vmentry_asm(struct guest_regs *regs, struct vmcb *vmcb,
+                                 uint64_t vmcb_pa, uint64_t host_vmcb_pa,
+                                 struct vcpu *vcpu);
+
+static int svm_vcpu_run(struct vcpu *vcpu)
+{
+    return relm_svm_vmentry_asm(&vcpu->arch.regs, vcpu->arch.vmcb, 
+                                vcpu->arch.vmcb_pa, vcpu->arch.host_vmcb_pa, 
+                                vcpu); 
+}
+
+static int svm_vm_init(struct relm_vm *vm)
+{
+    (void)vm;
+    return 0;
+}
+
+static void svm_vm_destroy(struct relm_vm *vm)
+{
+    (void)vm;
+}
+
+const struct relm_vm_operations svm_vm_ops = {
+    .vm_init    = svm_vm_init,
+    .vm_destroy = svm_vm_destroy,
+    .add_vcpu   = svm_add_vcpu,
+};
 
 void relm_dump_vcpu(struct vcpu *vcpu)
 {
