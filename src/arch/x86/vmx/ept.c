@@ -309,7 +309,7 @@ void relm_ept_context_destroy(struct ept_context *ept)
 
 static inline void *relm_ept_alloc_table(void)
 {
-    void *table = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO); 
+    void *table = (void *)__get_free_page(GFP_ATOMIC | __GFP_ZERO); 
     if(unlikely(!table))
     {
         pr_err("RELM: Failed to alloc EPT table\n");
@@ -467,6 +467,20 @@ int relm_ept_map_range(struct ept_context *ept, uint64_t gpa_start,
     pr_info("RELM: Successfully mapped %llu pages\n", num_pages);
 
     return 0;
+}
+
+int relm_ept_map_huge_page(struct ept_context *ept, uint64_t gpa, 
+                           uint64_t hpa, uint64_t flags)
+{
+    ept_pdpt_t *pdpt; 
+    ept_pd_t *pd; 
+    ept_entry_t *leaf_entry; 
+    unsigned long irq_flags; 
+    uint32_t pml4_index; 
+    uint32_t pdpt_idx; 
+    uint32_t pd_idx; 
+
+
 }
 
 /*walks EPT table to find the leaf entry and clear it */ 

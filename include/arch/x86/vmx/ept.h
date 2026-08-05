@@ -142,6 +142,19 @@ int relm_ept_map_range(struct ept_context *ept, uint64_t gpa_start,
 
 int relm_ept_unmap_page(struct ept_context *ept, uint64_t gpa); 
 
+
+/*install one GPA-HPA 2 mib leaf range directly at the PD level*/ 
+int relm_ept_map_huge_page(struct ept_context *ept, uint64_t gpa, 
+                           uint64_t hpa, uint64_t flags);
+
+int relm_ept_map_guest_4kb(struct ept_context *ept, struct relm_vm *vm, 
+                           uint64_t gpa_start, uint64_t hpa_start, 
+                           uint64_t size, uint64_t flags); 
+
+int relm_ept_map_guest_ram_huge(struct ept_context *ept, struct relm_vm *vm,
+                                uint64_t gpa_start, uint64_t hpa_start,
+                                uint64_t size, uint64_t flags);
+
 int relm_ept_create_guest_page_tables(struct relm_vm *vm);
 
 int relm_ept_translate_gpa(struct ept_context *ept,

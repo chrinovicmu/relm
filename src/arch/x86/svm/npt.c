@@ -191,7 +191,7 @@ void relm_npt_context_destroy(struct npt_context *npt)
 }
 static inline void *relm_npt_alloc_table(void)
 {
-    void *table = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+    void *table = (void *)__get_free_page(GFP_ATOMIC | __GFP_ZERO);
 
     if (unlikely(!table)) {
         pr_err("RELM: Failed to alloc NPT table\n");

@@ -10,6 +10,7 @@
 #include <include/arch/x86/vmx/vm_arch.h>
 #include <include/relm/decoder.h>
 #include <include/arch/x86/vmx/vcpu_arch.h>
+#include <include/arch/x86/vmx/mmu.h>
 #include <relm/vcpu.h>
 #include <utils/utils.h>
 

@@ -12,6 +12,7 @@
 #include <vmexit.h>
 #include <apic.h>
 #include <ept.h>
+#include <include/arch/x86/vmx/mmu.h>
 #include <relm/decoder.h>
 #include <utils/utils.h>
 

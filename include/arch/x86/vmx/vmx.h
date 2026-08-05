@@ -50,16 +50,9 @@ static const uint32_t CR3_TARGET_VALUES[RELM_CR3_MAX_TARGETS] = {
 /*cr3 target cache entry */ 
 struct cr3_target_entry
 {
-    /*gpa written to cr3*/ 
     uint64_t cr3_value; 
-
-    /*times the guest wrote this exact cr3 value */  
     uint64_t hit_count; 
-    
-    /*timestamp of most recent hit*/ 
     uint64_t last_seen_ns; 
-
-    /*is currently in a slot*/ 
     bool promoted; 
 }; 
 
