@@ -10,10 +10,17 @@ struct vcpu;
 /*4 KiB table / 8-byte entiries */ 
 #define NPT_ENTRIES_PER_TABLE   512 
 
-/* Leaf sizes per level: PT leaf, PD leaf (PS=1), PDPT leaf (PS=1). */
-#define NPT_PAGE_SIZE_4KB       (4ULL * 1024)
-#define NPT_PAGE_SIZE_2MB       (2ULL * 1024 * 1024)
-#define NPT_PAGE_SIZE_1GB       (1ULL * 1024 * 1024 * 1024)
+#define NPT_PAGE_SHIFT_4KB    12ULL
+#define NPT_PAGE_SHIFT_2MB    21ULL
+#define NPT_PAGE_SHIFT_1GB    30ULL
+
+#define NPT_PAGE_SIZE_4KB     (1ULL << NPT_PAGE_SHIFT_4KB)
+#define NPT_PAGE_SIZE_2MB     (1ULL << NPT_PAGE_SHIFT_2MB)
+#define NPT_PAGE_SIZE_1GB     (1ULL << NPT_PAGE_SHIFT_1GB)
+
+#define NPT_PAGE_MASK_4KB     (NPT_PAGE_SIZE_4KB - 1ULL)   /* 0x00000FFF */
+#define NPT_PAGE_MASK_2MB     (NPT_PAGE_SIZE_2MB - 1ULL)   /* 0x001FFFFF */
+#define NPT_PAGE_MASK_1GB     (NPT_PAGE_SIZE_1GB - 1ULL)   /* 0x3FFFFFFF */
 
 #define NPT_PRESENT             (1ULL << 0)  
 #define NPT_WRITABLE            (1ULL << 1)  
@@ -135,4 +142,20 @@ int relm_npt_handle_fault(struct vcpu *vcpu, uint64_t gpa, uint64_t error_code);
 void relm_npt_invalidate(struct relm_vm *vm);
 void relm_npt_dump_tables(struct npt_context *npt);
 
+static inline bool npt_is_4kb_aligned(uint64_t addr)
+{
+    return (addr & NPT_PAGE_MASK_4KB) == 0ULL;
+}
+
+static inline bool npt_is_2mb_aligned(uint64_t addr)
+{
+    return (addr & NPT_PAGE_MASK_2MB) == 0ULL;
+}
+
+static inline bool npt_is_1gb_aligned(uint64_t addr)
+{
+    return (addr & NPT_PAGE_MASK_1GB) == 0ULL;
+}
+
+#endif /* RELM_NPT_H */
 #endif

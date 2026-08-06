@@ -18,10 +18,17 @@ struct vcpu;
 #define EPT_LEVLS               4
 #define EPT_ENTRIES_PER_TABLE  512 
 
-/*EPT page sizes */ 
-#define EPT_PAGE_SIZE_4KB       (4ULL * 1024)
-#define EPT_PAGE_SIZE_2MB       (2ULL * 1024 * 1024)
-#define EPT_PAGE_SIZE_1GB       (1ULL * 1024 * 1024 * 1024)
+#define EPT_PAGE_SHIFT_4KB    12ULL
+#define EPT_PAGE_SHIFT_2MB    21ULL
+#define EPT_PAGE_SHIFT_1GB    30ULL
+
+#define EPT_PAGE_SIZE_4KB     (1ULL << EPT_PAGE_SHIFT_4KB)
+#define EPT_PAGE_SIZE_2MB     (1ULL << EPT_PAGE_SHIFT_2MB)
+#define EPT_PAGE_SIZE_1GB     (1ULL << EPT_PAGE_SHIFT_1GB)
+
+#define EPT_PAGE_MASK_4KB     (EPT_PAGE_SIZE_4KB - 1ULL)   /* 0x00000FFF */
+#define EPT_PAGE_MASK_2MB     (EPT_PAGE_SIZE_2MB - 1ULL)   /* 0x001FFFFF */
+#define EPT_PAGE_MASK_1GB     (EPT_PAGE_SIZE_1GB - 1ULL)   /* 0x3FFFFFFF */ 
 
 /*EPT entry flags (bits in EPT PTE/PDE/PDPTE/PML4)*/ 
 
@@ -195,4 +202,18 @@ void relm_ept_dump_tables(struct ept_context *ept);
 #define EPT_CAP_INVEPT_SINGLE   (1ULL << 25) /*single context INVEPT */ 
 #define EPT_CAP_INVEPT_ALL      (1ULL << 26) /*all-context INVEPT */ 
 
+static inline bool ept_is_4kb_aligned(uint64_t addr)
+{
+    return (addr & EPT_PAGE_MASK_4KB) == 0ULL;
+}
+
+static inline bool ept_is_2mb_aligned(uint64_t addr)
+{
+    return (addr & EPT_PAGE_MASK_2MB) == 0ULL;
+}
+
+static inline bool ept_is_1gb_aligned(uint64_t addr)
+{
+    return (addr & EPT_PAGE_MASK_1GB) == 0ULL;
+}
 #endif /*EPT_H */ 

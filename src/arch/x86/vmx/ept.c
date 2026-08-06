@@ -358,8 +358,7 @@ int relm_ept_map_page(struct ept_context *ept, uint64_t gpa,
         return -EINVAL; 
     }
 
-    /*ensure addresses are page-aligned */ 
-    if((gpa & 0xFFF) || (hpa & 0xFFF))
+    if(ept_is_4kb_aligned(gpa) && ept_is_4kb_aligned(hpa)); 
     {
         pr_err("RELM: Addresses must be 4KB aligned (GPA=0x%llx, HPA=0x%llx)\n",
                gpa, hpa); 
@@ -480,9 +479,177 @@ int relm_ept_map_huge_page(struct ept_context *ept, uint64_t gpa,
     uint32_t pdpt_idx; 
     uint32_t pd_idx; 
 
+    if (!ept || !ept->pml4) {
+        pr_err("RELM: Invalid EPT context\n");
+        return -EINVAL;
+    }
 
+    if(!ept_is_2mb_aligned(gpa) || !ept_is_2mb_aligned(hpa)){
+        pr_err("RELM: Huge EPT mapping must be 2MB aligned (GPA=0x%llx, HPA=0x%llx)\n",
+               gpa, hpa);
+        return -EINVAL;
+    }
+
+    if (!(flags & EPT_ACCESS_READ)) {
+        pr_err("RELM: EPT mapping must have at least read access\n");
+        return -EINVAL;
+    }
+
+    spin_lock_irqsave(&ept->lock, irq_flags); 
+
+    pml4_index = EPT_PML4_INDEX(gpa); 
+
+    pdpt = (ept_pdpt_t)relm_ept_get_or_create_table(
+        &ept->pml4->entries[pml4_index], 3); 
+    if(!pdpt){
+        spin_unlock_irqrestore(&ept->lock, irq_flags); 
+        return -ENOMEM; 
+    }
+
+    pdpt_idx = EPT_PDPT_INDEX(gpa); 
+    pd = (ept_pd_t *)relm_ept_get_or_create_table(
+        &pdpt->entries[pdpt_idx], 2);
+    if(!pd){
+        spin_unlock_irqrestore(&ept->lock, irq_flags); 
+        return -ENOMEM; 
+    }
+
+    pd_idx = EPT_PD_INDEX(gpa); 
+    leaf_entry = &pd->entries[pd_idx]; 
+
+    if (*leaf_entry & EPT_ACCESS_READ) {
+        pr_warn("RELM: GPA 0x%llx already mapped (huge), overwriting\n", gpa);
+    } else {
+        ept->stats.pages_2mb++;
+        ept->stats.total_mapped += EPT_PAGE_SIZE_2MB;
+    }
+    
+    /*EPT_PAGE_SIZE(PS): 2 MiB leaf*/ 
+    *leaf_entry = (hpa * EPT_ADDR_MASK) | flags | EPT_PAGE_SIZE;
+
+    spin_unlock_irqrestore(&ept->lock, irq_flags); 
+
+    return 0; 
 }
 
+/*does gpa gpa, gpa + size touch reserved mmio region*/ 
+static bool ept_range_over_mmio(struct relm_vm *vm, uint64_t gpa, uint64_t size)
+{
+    unsigned int i, count; 
+    struct relm_mmio_region region; 
+    uint64_t range_end = gpa + size; 
+
+    if(!vm)
+        return false; 
+
+    count = relm_vm_mmio_region_count(vm);
+    for(i = 0; i < count; ++i){
+        if(relm_vm_mmio_region_at(vm, i, &region) < 0)
+            continue; 
+
+        if(gpa < region.gpa_start _ region.size && region.gpa_start < range_end)
+            return true; 
+    }
+
+    return false; 
+}
+
+int relm_ept_map_guest_ram_4kb(struct ept_context *ept, struct relm_vm *vm, 
+                               uint64_t gpa_start, uint64_t hpa_start, 
+                               uint64_t size, uint64_t flags)
+{
+    uint64_t gpa; 
+    uint64_t hpa; 
+    uint64_t num_pages; 
+    uint64_t i; 
+    int ret; 
+
+    if(!ept)
+        return -EINVAL; 
+
+    size = PAGE_ALIGN(size); 
+    num_pages = size / EPT_PAGE_SIZE_4KB; 
+
+    for(i = 0; i < num_pages; ++i){
+        gpa = gpa_start + (i * EPT_PAGE_SIZE_4KB); 
+        hpa = hpa_start + (i * EPT_PAGE_SIZE_4KB); 
+
+        if(ept_range_over_mmio(vm, gpa, EPT_PAGE_SIZE_4KB)){
+            PDEBUG("RELM: skipping GPA 0x%llx in guest RAM map — reserved MMIO\n",
+                   gpa);
+            continue;
+        }
+
+        ret = relm_ept_map_page(ept, gpa, hpa, flags);
+        if (ret < 0) {
+            pr_err("RELM: Failed to 4KB-map guest RAM page %llu/%llu (GPA=0x%llx)\n",
+                   i + 1, num_pages, gpa);
+            return ret;
+        }
+    }
+    pr_info("RELM: Guest RAM mapped 4KB-only: %llu pages (GPA 0x%llx, size 0x%llx)\n",
+            num_pages, gpa_start, size);
+
+    return 0;
+}
+
+int relm_ept_map_guest_ram_huge(struct ept_context *ept, struct relm_vm *vm, 
+                                uint64_t gpa_start, uint64_t hpa_start, 
+                                uint64_t size, uint64_t flags)
+{
+    uint64_t gpa;
+    uint64_t hpa;
+    uint64_t end;
+    int ret;
+
+    if (!ept)
+        return -EINVAL;
+
+    size = PAGE_ALIGN(size);
+    end = gpa_start + size;
+
+    gpa = gpa_start;
+    hpa = hpa_start;
+
+    bool aligned_2mb = false; 
+
+    while(gpa < end){
+        uint64_t remaining = end - gpa;
+        bool whole_2mb_fits = remaining >= EPT_PAGE_SIZE_2MB; 
+        if(ept_is_2mb_aligned(gpa) && ept_is_2mb_aligned(hpa))
+            aligned_2mb = true; 
+
+        if(aligned_2mb && whole_2mb_fits && 
+           !ept_range_over_mmio(vm, gpa, EPT_PAGE_SIZE_2MB)){
+
+            ret = relm_ept_map_huge_page(ept, gpa, hpa, flags); 
+            if (ret < 0) {
+                pr_err("RELM: Failed to huge-map GPA 0x%llx\n", gpa);
+                return ret;
+            }
+
+            gpa += EPT_PAGE_SIZE_2MB;
+            hpa += EPT_PAGE_SIZE_2MB;
+        }else{
+
+            uint64_t to_boundary = EPT_PAGE_SIZE_2MB - offset_in_2mb;
+            uint64_t chunk = (remaining < to_boundary) ? remaining : to_boundary;
+
+            ret = relm_ept_map_guest_ram_4kb(ept, vm, gpa, hpa, chunk, flags);
+            if (ret < 0)
+                return ret;
+
+            gpa += chunk;
+            hpa += chunk;
+        }
+    }
+
+    pr_info("RELM: Guest RAM mapped (huge-preferred): 4KB=%llu 2MB=%llu pages "
+            "(GPA 0x%llx, size 0x%llx)\n",
+            ept->stats.pages_4kb, ept->stats.pages_2mb, gpa_start, size);
+
+    return 0;
+}
 /*walks EPT table to find the leaf entry and clear it */ 
 int relm_ept_unmap_page(struct ept_context *ept, uint64_t gpa)
 {

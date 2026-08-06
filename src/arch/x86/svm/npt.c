@@ -337,6 +337,186 @@ int relm_npt_map_range(struct npt_context *npt, uint64_t gpa_start,
     return 0;
 }
 
+int relm_npt_map_huge_page(struct npt_context *npt, uint64_t gpa, 
+                           uint64_t hpa, uint64_t flags)
+{
+    npt_pdpt_t *pdpt;
+    npt_pd_t *pd;
+    npt_entry_t *leaf_entry;
+    unsigned long irq_flags;
+    uint32_t pml4_index;
+    uint32_t pdpt_idx;
+    uint32_t pd_idx;
+
+    if (!npt || !npt->pml4) {
+        pr_err("RELM: Invalid NPT context\n");
+        return -EINVAL;
+    }
+
+    if(!npt_is_2mb_aligned(gpa) || !npt_is_2mb_aligned(hpa)){
+        pr_err("RELM: Huge NPT mapping must be 2MB aligned (GPA=0x%llx, HPA=0x%llx)\n",
+               gpa, hpa);
+        return -EINVAL;
+    }
+
+    if ((flags & (NPT_PRESENT | NPT_USER)) != (NPT_PRESENT | NPT_USER)) {
+        pr_err("RELM: NPT mapping must be present + user (flags=0x%llx)\n",
+               flags);
+        return -EINVAL;
+    }
+
+    spin_lock_irqsave(&npt->lock, irq_flags);
+
+    pml4_index = NPT_PML4_INDEX(gpa);
+
+    pdpt = (npt_pdpt_t *)relm_npt_get_or_create_table(
+        &npt->pml4->entries[pml4_index], 3);
+    if (!pdpt) {
+        spin_unlock_irqrestore(&npt->lock, irq_flags);
+        return -ENOMEM;
+    }
+
+    pdpt_idx = NPT_PDPT_INDEX(gpa);
+
+    pd = (npt_pd_t *)relm_npt_get_or_create_table(
+        &pdpt->entries[pdpt_idx], 2);
+    if (!pd) {
+        spin_unlock_irqrestore(&npt->lock, irq_flags);
+        return -ENOMEM;
+    }
+
+    pd_idx = NPT_PD_INDEX(gpa);
+
+    leaf_entry = &pd->entries[pd_idx];
+
+    if (*leaf_entry & NPT_PRESENT) {
+        pr_warn("RELM: GPA 0x%llx already NPT-mapped (huge), overwriting\n", gpa);
+    } else {
+        npt->stats.pages_2mb++;
+        npt->stats.total_mapped += NPT_PAGE_SIZE_2MB;
+    }
+
+    *leaf_entry = (hpa & NPT_ADDR_MASK) | flags | NPT_PAGE_SIZE;
+
+    spin_unlock_irqrestore(&npt->lock, irq_flags);
+
+    return 0;
+}
+
+static bool npt_range_overlaps_mmio(struct relm_vm *vm, uint64_t gpa, uint64_t size)
+{
+    unsigned int i, count;
+    struct relm_mmio_region region;
+    uint64_t range_end = gpa + size;
+
+    if (!vm)
+        return false;
+
+    count = relm_vm_mmio_region_count(vm);
+    for (i = 0; i < count; i++) {
+        if (relm_vm_mmio_region_at(vm, i, &region) < 0)
+            continue;
+
+        if (gpa < region.gpa_start + region.size && region.gpa_start < range_end)
+            return true;
+    }
+
+    return false;
+}
+
+int relm_npt_map_guest_ram_4kb(struct npt_context *npt, struct relm_vm *vm,
+                               uint64_t gpa_start, uint64_t hpa_start,
+                               uint64_t size, uint64_t flags)
+{
+    uint64_t gpa;
+    uint64_t hpa;
+    uint64_t num_pages;
+    uint64_t i;
+    int ret;
+
+    if (!npt)
+        return -EINVAL;
+
+    size = PAGE_ALIGN(size);
+    num_pages = size / NPT_PAGE_SIZE_4KB;
+
+    for (i = 0; i < num_pages; i++) {
+        gpa = gpa_start + (i * NPT_PAGE_SIZE_4KB);
+        hpa = hpa_start + (i * NPT_PAGE_SIZE_4KB);
+
+        if (npt_range_overlaps_mmio(vm, gpa, NPT_PAGE_SIZE_4KB)) {
+            PDEBUG("RELM: skipping GPA 0x%llx in guest RAM map — reserved MMIO\n",
+                   gpa);
+            continue;
+        }
+
+        ret = relm_npt_map_page(npt, gpa, hpa, flags);
+        if (ret < 0) {
+            pr_err("RELM: Failed to 4KB-map guest RAM page %llu/%llu (GPA=0x%llx)\n",
+                   i + 1, num_pages, gpa);
+            return ret;
+        }
+    }
+
+    pr_info("RELM: Guest RAM mapped 4KB-only: %llu pages (GPA 0x%llx, size 0x%llx)\n",
+            num_pages, gpa_start, size);
+
+    return 0;
+}
+
+int relm_npt_map_guest_ram_huge(struct npt_context *npt, struct relm_vm *vm,
+                                uint64_t gpa_start, uint64_t hpa_start,
+                                uint64_t size, uint64_t flags)
+{
+    uint64_t gpa;
+    uint64_t hpa;
+    uint64_t end;
+    int ret;
+
+    if (!npt)
+        return -EINVAL;
+
+    size = PAGE_ALIGN(size);
+    end = gpa_start + size;
+
+    gpa = gpa_start;
+    hpa = hpa_start;
+
+    while (gpa < end) {
+        uint64_t remaining = end - gpa;
+        uint64_t offset_in_2mb = gpa & (NPT_PAGE_SIZE_2MB - 1);
+        bool aligned_2mb = !offset_in_2mb && !(hpa & (NPT_PAGE_SIZE_2MB - 1));
+        bool whole_2mb_fits = remaining >= NPT_PAGE_SIZE_2MB;
+
+        if (aligned_2mb && whole_2mb_fits &&
+            !npt_range_overlaps_mmio(vm, gpa, NPT_PAGE_SIZE_2MB)) {
+            if (ret < 0) {
+                pr_err("RELM: Failed to huge-map GPA 0x%llx\n", gpa);
+                return ret;
+            }
+
+            gpa += NPT_PAGE_SIZE_2MB;
+            hpa += NPT_PAGE_SIZE_2MB;
+        } else {
+            uint64_t to_boundary = NPT_PAGE_SIZE_2MB - offset_in_2mb;
+            uint64_t chunk = (remaining < to_boundary) ? remaining : to_boundary;
+
+            ret = relm_npt_map_guest_ram_4kb(npt, vm, gpa, hpa, chunk, flags);
+            if (ret < 0)
+                return ret;
+
+            gpa += chunk;
+            hpa += chunk;
+        }
+    }
+
+    pr_info("RELM: Guest RAM mapped (huge-preferred): 4KB=%llu 2MB=%llu pages "
+            "(GPA 0x%llx, size 0x%llx)\n",
+            npt->stats.pages_4kb, npt->stats.pages_2mb, gpa_start, size);
+
+    return 0;
+}
+
 int relm_npt_unmap_page(struct npt_context *npt, uint64_t gpa)
 {
     npt_pdpt_t *pdpt;
