@@ -641,12 +641,15 @@ static int svm_vcpu_init(struct vcpu *vcpu)
 
 }
 
+extern int relm_svm_vmentry_asm(struct guest_regs *regs, struct vmcb *vmcb,
+                                 uint64_t vmcb_pa, uint64_t host_vmcb_pa,
+                                 struct vcpu *vcpu);
+
 static int svm_vcpu_run(struct vcpu *vcpu)
 {
-    pr_err("RELM: VCPU%d: svm_vcpu_run: no VMRUN assembly yet "
-           "(svm_asm.S not written) — cannot enter guest\n",
-           vcpu ? vcpu->vpid : -1);
-    return -ENOSYS;
+    return relm_svm_vmentry_asm(&vcpu->arch.regs, vcpu->arch.vmcb, 
+                                vcpu->arch.vmcb_pa, vcpu->arch.host_vmcb_pa, 
+                                vcpu); 
 }
 
 static void svm_vcpu_destroy(struct vcpu *vcpu)
@@ -727,17 +730,6 @@ static int svm_add_vcpu(struct relm_vm *vm, int vpid)
             vpid, vm->vm_id, vcpu->target_cpu_id);
 
     return 0;
-}
-
-extern int relm_svm_vmentry_asm(struct guest_regs *regs, struct vmcb *vmcb,
-                                 uint64_t vmcb_pa, uint64_t host_vmcb_pa,
-                                 struct vcpu *vcpu);
-
-static int svm_vcpu_run(struct vcpu *vcpu)
-{
-    return relm_svm_vmentry_asm(&vcpu->arch.regs, vcpu->arch.vmcb, 
-                                vcpu->arch.vmcb_pa, vcpu->arch.host_vmcb_pa, 
-                                vcpu); 
 }
 
 static int svm_vm_init(struct relm_vm *vm)
