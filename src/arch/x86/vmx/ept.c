@@ -499,7 +499,7 @@ int relm_ept_map_huge_page(struct ept_context *ept, uint64_t gpa,
 
     pml4_index = EPT_PML4_INDEX(gpa); 
 
-    pdpt = (ept_pdpt_t)relm_ept_get_or_create_table(
+    pdpt = (ept_pdpt_t *)relm_ept_get_or_create_table(
         &ept->pml4->entries[pml4_index], 3); 
     if(!pdpt){
         spin_unlock_irqrestore(&ept->lock, irq_flags); 
@@ -533,7 +533,7 @@ int relm_ept_map_huge_page(struct ept_context *ept, uint64_t gpa,
 }
 
 /*does gpa gpa, gpa + size touch reserved mmio region*/ 
-static bool ept_range_over_mmio(struct relm_vm *vm, uint64_t gpa, uint64_t size)
+static bool ept_range_overlaps_mmio(struct relm_vm *vm, uint64_t gpa, uint64_t size)
 {
     unsigned int i, count; 
     struct relm_mmio_region region; 
@@ -547,7 +547,7 @@ static bool ept_range_over_mmio(struct relm_vm *vm, uint64_t gpa, uint64_t size)
         if(relm_vm_mmio_region_at(vm, i, &region) < 0)
             continue; 
 
-        if(gpa < region.gpa_start _ region.size && region.gpa_start < range_end)
+        if(gpa < region.gpa_start + region.size && region.gpa_start < range_end)
             return true; 
     }
 
@@ -574,7 +574,7 @@ int relm_ept_map_guest_ram_4kb(struct ept_context *ept, struct relm_vm *vm,
         gpa = gpa_start + (i * EPT_PAGE_SIZE_4KB); 
         hpa = hpa_start + (i * EPT_PAGE_SIZE_4KB); 
 
-        if(ept_range_over_mmio(vm, gpa, EPT_PAGE_SIZE_4KB)){
+        if(ept_range_overlaps_mmio(vm, gpa, EPT_PAGE_SIZE_4KB)){
             PDEBUG("RELM: skipping GPA 0x%llx in guest RAM map — reserved MMIO\n",
                    gpa);
             continue;
@@ -593,8 +593,8 @@ int relm_ept_map_guest_ram_4kb(struct ept_context *ept, struct relm_vm *vm,
     return 0;
 }
 
-int relm_ept_map_guest_ram_huge(struct ept_context *ept, struct relm_vm *vm, 
-                                uint64_t gpa_start, uint64_t hpa_start, 
+int relm_ept_map_guest_ram_huge(struct ept_context *ept, struct relm_vm *vm,
+                                uint64_t gpa_start, uint64_t hpa_start,
                                 uint64_t size, uint64_t flags)
 {
     uint64_t gpa;
@@ -611,18 +611,15 @@ int relm_ept_map_guest_ram_huge(struct ept_context *ept, struct relm_vm *vm,
     gpa = gpa_start;
     hpa = hpa_start;
 
-    bool aligned_2mb = false; 
-
-    while(gpa < end){
+    while (gpa < end) {
         uint64_t remaining = end - gpa;
-        bool whole_2mb_fits = remaining >= EPT_PAGE_SIZE_2MB; 
-        if(ept_is_2mb_aligned(gpa) && ept_is_2mb_aligned(hpa))
-            aligned_2mb = true; 
+        uint64_t offset_in_2mb = gpa & (EPT_PAGE_SIZE_2MB - 1);
+        bool aligned_2mb = !offset_in_2mb && !(hpa & (EPT_PAGE_SIZE_2MB - 1));
+        bool whole_2mb_fits = remaining >= EPT_PAGE_SIZE_2MB;
 
-        if(aligned_2mb && whole_2mb_fits && 
-           !ept_range_over_mmio(vm, gpa, EPT_PAGE_SIZE_2MB)){
-
-            ret = relm_ept_map_huge_page(ept, gpa, hpa, flags); 
+        if (aligned_2mb && whole_2mb_fits &&
+            !ept_range_overlaps_mmio(vm, gpa, EPT_PAGE_SIZE_2MB)) {
+            ret = relm_ept_map_huge_page(ept, gpa, hpa, flags);
             if (ret < 0) {
                 pr_err("RELM: Failed to huge-map GPA 0x%llx\n", gpa);
                 return ret;
@@ -630,8 +627,7 @@ int relm_ept_map_guest_ram_huge(struct ept_context *ept, struct relm_vm *vm,
 
             gpa += EPT_PAGE_SIZE_2MB;
             hpa += EPT_PAGE_SIZE_2MB;
-        }else{
-
+        } else {
             uint64_t to_boundary = EPT_PAGE_SIZE_2MB - offset_in_2mb;
             uint64_t chunk = (remaining < to_boundary) ? remaining : to_boundary;
 
@@ -650,6 +646,7 @@ int relm_ept_map_guest_ram_huge(struct ept_context *ept, struct relm_vm *vm,
 
     return 0;
 }
+
 /*walks EPT table to find the leaf entry and clear it */ 
 int relm_ept_unmap_page(struct ept_context *ept, uint64_t gpa)
 {
