@@ -9,6 +9,29 @@ ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHS)),)
     $(error ARCH='$(ARCH)' is not supported. Supported: $(SUPPORTED_ARCHS))
 endif
 
+# Zydis is compiled from pinned upstream sources instead of linked as a host
+# userspace library.
+ZYDIS_CPPFLAGS := \
+    -DZYAN_NO_LIBC             \
+    -DZYCORE_STATIC_BUILD      \
+    -DZYDIS_STATIC_BUILD       \
+    -DZYDIS_DISABLE_ENCODER    \
+    -DZYDIS_DISABLE_FORMATTER  \
+    -DZYDIS_DISABLE_SEGMENT    \
+    -DZYDIS_DISABLE_AVX512     \
+    -DZYDIS_DISABLE_KNC
+
+ZYDIS_C_NAMES := \
+    MetaInfo.c    \
+    Mnemonic.c    \
+    Register.c    \
+    SharedData.c  \
+    String.c      \
+    Utils.c       \
+    Zydis.c       \
+    Decoder.c     \
+    DecoderData.c
+
 ifeq ($(ARCH),x86)
     SUPPORTED_SUBTARGETS := vmx svm
     ifeq ($(filter $(SUBTARGET),$(SUPPORTED_SUBTARGETS)),)
@@ -23,11 +46,6 @@ else
 endif
 
 ifneq ($(KERNELRELEASE),)
-# =============================================================================
-# Kbuild context — this file is re-read by the kernel build system with
-# KERNELRELEASE set. Only object lists and flags may live here; any host
-# rule would be resolved relative to the kernel tree and fail.
-# =============================================================================
 
 ifeq ($(SUBTARGET),)
     ARCH_INCLUDE_DIR := $(src)/include/arch/$(ARCH)
@@ -47,7 +65,13 @@ ARCH_C_SRCS  := $(wildcard $(src)/$(ARCH_SRC_DIR)/*.c)
 ARCH_S_SRCS  := $(wildcard $(src)/$(ARCH_SRC_DIR)/*.S)
 
 ifeq ($(ARCH),x86)
-    ARCH_C_SRCS += $(wildcard $(src)/src/arch/x86/decoder/*.c)
+    ARCH_C_SRCS += $(src)/src/arch/x86/decoder/utils.c
+    ARCH_C_SRCS += $(addprefix $(src)/third_party/zydis/src/,$(ZYDIS_C_NAMES))
+
+    ZYDIS_C_OBJS := $(addprefix third_party/zydis/src/,$(ZYDIS_C_NAMES:.c=.o))
+    $(foreach zydis_obj,$(ZYDIS_C_OBJS), \
+        $(eval CFLAGS_$(zydis_obj) += -Wno-unused-function \
+                                      -Wno-unused-const-variable))
 endif
 
 ARCH_C_OBJS  := $(patsubst $(src)/%.c, %.o, $(ARCH_C_SRCS))
@@ -96,7 +120,10 @@ ccflags-y := \
     -DRELM_ARCH_$(ARCH_UPPER)
 
 ifeq ($(ARCH),x86)
-    ccflags-y += -I$(src)/include/arch/x86/decoder
+    ccflags-y += \
+        -I$(src)/third_party/zydis/include \
+        -I$(src)/third_party/zydis/src \
+        $(ZYDIS_CPPFLAGS)
 endif
 
 ifneq ($(ARCH_SHARED_DIR),)
@@ -118,10 +145,6 @@ ifneq ($(ARCH_SHARED_DIR),)
 endif
 
 else
-# =============================================================================
-# Host context — invoked from the command line. Prepares generated inputs
-# (guest binary, relm_arch symlink) then hands off to the kernel build.
-# =============================================================================
 
 AS      ?= $(CROSS_COMPILE)as
 OBJCOPY ?= $(CROSS_COMPILE)objcopy
@@ -129,8 +152,14 @@ OBJCOPY ?= $(CROSS_COMPILE)objcopy
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)
 
-.PHONY: all modules clean info FORCE
+.PHONY: all modules clean info decoder-test FORCE
 .DEFAULT_GOAL := all
+
+# The decoder and its public contract intentionally contain no kernel-only
+# runtime dependencies. This tiny host binary therefore exercises the same
+# adapter and generic dispatcher used by the module, making prefix/register-
+# lane regressions testable even on a development machine without Linux Kbuild.
+DECODER_TEST_BIN := /tmp/relm-decoder-test
 
 # The generic layer (include/relm/*) reaches arch-specific headers through the
 # stable prefix <relm_arch/...>. We wire that prefix to the active arch backend
@@ -166,6 +195,20 @@ modules: guest/guest_kernel.bin $(RELM_ARCH_LINK)
 	@echo "    SUBTARGET = $(if $(SUBTARGET),$(SUBTARGET),(none))"
 	@echo ""
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+decoder-test:
+	$(CC) -std=c11 -Wall -Wextra -Werror \
+		-Wno-unused-function -Wno-unused-const-variable \
+		-DCONFIG_X86=1 $(ZYDIS_CPPFLAGS) \
+		-I$(PWD)/include \
+		-I$(PWD)/third_party/zydis/include \
+		-I$(PWD)/third_party/zydis/src \
+		tests/decoder/decoder_test.c \
+		src/core/decoder.c \
+		src/arch/x86/decoder/utils.c \
+		$(addprefix third_party/zydis/src/,$(ZYDIS_C_NAMES)) \
+		-o $(DECODER_TEST_BIN)
+	$(DECODER_TEST_BIN)
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean

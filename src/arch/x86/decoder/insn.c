@@ -11,8 +11,11 @@
 #else
 #include <string.h>
 #endif
-#include <include/arch/x86/decoder/inat.h> /* __ignore_sync_check__ */
-#include <include/arch/x86/decoder/insn.h> /* __ignore_sync_check__ */
+#include "inat.h" 
+#include "insn.h"
+
+/* Attribute tables are generated from opcode map */
+#include "inat-tables.c"
 #include <linux/unaligned.h> /* __ignore_sync_check__ */
 
 #include <linux/errno.h>

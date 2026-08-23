@@ -12,7 +12,7 @@
 #include <vmexit.h>
 #include <apic.h>
 #include <ept.h>
-#include <include/arch/x86/vmx/mmu.h>
+#include <mmu.h>
 #include <relm/decoder.h>
 #include <utils/utils.h>
 
@@ -1218,37 +1218,14 @@ int relm_apic_write(struct vcpu *vcpu, uint32_t offset, uint32_t value)
     return 0;
 }
 
-/*
- * relm_apic_handle_access() — top-level handler for APIC-access VM-exits
- * (exit reason 44). The guest touched the APIC page at GPA 0xFEE00000;
- * hardware gives us only the page offset and access type in the exit
- * qualification — NOT the value being written or the destination register.
- * Those we must recover ourselves by fetching and decoding the faulting
- * instruction, exactly like the virtio-MMIO EPT-violation path in
- * src/virtio/mmio.c.
- *
- * Flow:
- *   1. read exit qualification → register offset + access type;
- *   2. copy the instruction bytes at the guest RIP out of guest memory;
- *   3. decode them (relm_decode_instruction) to learn the operands;
- *   4. dispatch: writes resolve the source value (immediate or GPR) and
- *      call relm_apic_write(); reads call relm_apic_read() and store the
- *      result into the decoded destination GPR;
- *   5. advance the guest RIP past the emulated instruction.
- *
- * GPR reads/writes go through guest_reg_read()/guest_reg_write() on
- * vcpu->arch.regs — handle_vmexit() syncs that struct back into the
- * on-stack GPR block before VMRESUME, so writes there do reach the guest.
- * Returns 1 (resume guest), 0 with the vCPU stopped on a fatal condition,
- * or negative errno.
- */
 int relm_apic_handle_access(struct vcpu *vcpu)
 {
     uint64_t qual, guest_rip, guest_linear, instr_len;
     uint32_t offset, access_type, value;
+    unsigned long old_gpr;
     uint8_t insn_buf[15];
     struct relm_decoded_insn decoded;
-    int ret;
+    int decoded_len, ret;
 
     qual = __vmread(VM_EXIT_QUALIFICATION);
     offset = (uint32_t)(qual & APIC_ACCESS_OFFSET_MASK);
@@ -1257,7 +1234,24 @@ int relm_apic_handle_access(struct vcpu *vcpu)
     guest_rip = __vmread(GUEST_RIP);
     instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
 
-    guest_linear = relm_mmu_rip_to_linear(vcpu, guest_rip); 
+    PDEBUG("RELM: APIC ACCESS: offset=0x%03x type=%u RIP=0x%llx len=%llu\n",
+           offset, access_type, guest_rip, instr_len);
+
+    if (access_type == APIC_ACCESS_TYPE_LINEAR_FETCH) {
+        pr_err("RELM: APIC: INSTRUCTION FETCH at APIC offset=0x%03x "
+               "RIP=0x%llx — guest instruction pointer in APIC space!\n",
+               offset, guest_rip);
+        vcpu->state = VCPU_STATE_STOPPED;
+        return 0;
+    }
+
+    if (!instr_len || instr_len > sizeof(insn_buf)) {
+        pr_err("RELM: APIC: invalid VM-exit instruction length %llu at "
+               "RIP=0x%llx\n", instr_len, guest_rip);
+        return -EINVAL;
+    }
+
+    guest_linear = relm_mmu_rip_to_linear(vcpu, guest_rip);
     ret = relm_mmu_copy_from_guest_virt(vcpu, guest_linear, insn_buf, (size_t)instr_len);
     if (ret < 0) {
         pr_err("RELM: APIC: Failed to copy instruction bytes from guest "
@@ -1265,9 +1259,57 @@ int relm_apic_handle_access(struct vcpu *vcpu)
                guest_rip, guest_linear, ret);
         return ret;
     }
+    if (ret != (int)instr_len) {
+        pr_err("RELM: APIC: short instruction fetch at RIP=0x%llx "
+               "(wanted=%llu, copied=%d)\n",
+               guest_rip, instr_len, ret);
+        return -EFAULT;
+    }
+    /*
+     * Decode through the same narrow MOV contract as virtio-MMIO. VMX also
+     * reports the hardware-decoded instruction length and access direction,
+     * so both independent descriptions must agree before we mutate the APIC
+     * model or guest registers.
+     */
+    decoded_len = relm_decode_instruction(insn_buf, (int)instr_len, &decoded);
+    if (decoded_len < 0) {
+        pr_err("RELM: APIC: instruction decoding failed at RIP=0x%llx "
+               "(ret=%d)\n", guest_rip, decoded_len);
+        return decoded_len;
+    }
 
-    if (relm_decode_instruction(insn_buf, instr_len, &decoded) < 0) {
-        pr_err("RELM: APIC: Instruction decoding failed at RIP=0x%llx\n", guest_rip);
+    if (decoded.length != instr_len || decoded_len != (int)instr_len) {
+        pr_err("RELM: APIC: decoder/VMX length mismatch at RIP=0x%llx "
+               "(Zydis=%u, VMX=%llu)\n",
+               guest_rip, decoded.length, instr_len);
+        return -EINVAL;
+    }
+
+    /* xAPIC MMIO registers are aligned 32-bit quantities. */
+    if (decoded.memory_width != sizeof(value) || (offset & 3U)) {
+        pr_err("RELM: APIC: unsupported width=%u or unaligned offset=0x%03x "
+               "at RIP=0x%llx\n",
+               decoded.memory_width, offset, guest_rip);
+        return -EOPNOTSUPP;
+    }
+
+    if (((access_type == APIC_ACCESS_TYPE_LINEAR_WRITE ||
+          access_type == APIC_ACCESS_TYPE_EVENT_DELIVERY) &&
+         decoded.memory_access != RELM_MEMORY_ACCESS_WRITE) ||
+        ((access_type != APIC_ACCESS_TYPE_LINEAR_WRITE &&
+          access_type != APIC_ACCESS_TYPE_EVENT_DELIVERY) &&
+         decoded.memory_access != RELM_MEMORY_ACCESS_READ)) {
+        pr_err("RELM: APIC: VMX/decoder direction mismatch at RIP=0x%llx "
+               "(VMX type=%u, decoded=%u)\n",
+               guest_rip, access_type,
+               (unsigned int)decoded.memory_access);
+        return -EINVAL;
+    }
+
+    if (decoded.operand_kind == RELM_OPERAND_GPR &&
+        !relm_decoded_has_valid_gpr(&decoded)) {
+        pr_err("RELM: APIC: invalid decoded GPR %d at RIP=0x%llx\n",
+               decoded.gpr_index, guest_rip);
         return -EINVAL;
     }
 
@@ -1276,13 +1318,21 @@ int relm_apic_handle_access(struct vcpu *vcpu)
         case APIC_ACCESS_TYPE_LINEAR_WRITE:
         case APIC_ACCESS_TYPE_EVENT_DELIVERY:
 
-            /* DYNAMIC RESOLUTION: the written value is either encoded in
-             * the instruction (mov $imm, mem) or lives in whatever GPR
-             * the guest chose (mov %reg, mem) — resolve accordingly. */
-            if (decoded.is_immediate) {
-                value = (uint32_t)decoded.immediate;
+            /*
+             * Resolve the source from either the encoded immediate or the
+             * exact GPR lane Zydis identified. The latter avoids treating AH
+             * as AL and keeps extended R8-R15 register numbering intact.
+             */
+            if (decoded.operand_kind == RELM_OPERAND_IMMEDIATE) {
+                value = (uint32_t)(decoded.immediate &
+                                   relm_width_mask(decoded.memory_width));
+            } else if (decoded.operand_kind == RELM_OPERAND_GPR) {
+                old_gpr = guest_reg_read(&vcpu->arch.regs,
+                                         decoded.gpr_index);
+                value = (uint32_t)relm_decoded_gpr_extract(&decoded,
+                                                            old_gpr);
             } else {
-                value = (uint32_t)guest_reg_read(&vcpu->arch.regs, decoded.src_reg); /* Resolves RCX, RDX, etc. */
+                return -EINVAL;
             }
 
             /* Apply the write to the software APIC model (and its side
@@ -1296,6 +1346,9 @@ int relm_apic_handle_access(struct vcpu *vcpu)
 
         case APIC_ACCESS_TYPE_LINEAR_READ:
 
+            if (decoded.operand_kind != RELM_OPERAND_GPR)
+                return -EINVAL;
+
             /* Emulate the register read; invalid offsets read as 0 (the
              * guest still gets *something* and keeps running). */
             ret = relm_apic_read(vcpu, offset, &value);
@@ -1304,31 +1357,35 @@ int relm_apic_handle_access(struct vcpu *vcpu)
                 value = 0;
             }
 
-            /* DYNAMIC INJECTION: store the value into whichever
-             * destination GPR the decoded instruction names. The cast
-             * zero-extends, matching 32-bit mov semantics in long mode. */
-            guest_reg_write(&vcpu->arch.regs, decoded.dst_reg, (unsigned long)value);
+            /*
+             * Commit through the shared helper. For the accepted APIC dword
+             * read this zero-extends EAX-style destinations exactly as x86
+             * requires instead of overwriting a register by ad-hoc cast.
+             */
+            old_gpr = guest_reg_read(&vcpu->arch.regs, decoded.gpr_index);
+            guest_reg_write(&vcpu->arch.regs, decoded.gpr_index,
+                            (unsigned long)relm_decoded_gpr_commit(
+                                &decoded, old_gpr, value));
             break;
 
-        case APIC_ACCESS_TYPE_LINEAR_FETCH:
-            /* The guest's instruction pointer landed inside the APIC
-             * page. No sane guest does this — nothing executable lives
-             * there — so treat it as unrecoverable and stop the vCPU
-             * rather than let it wedge in an exit loop. */
-            pr_err("RELM: APIC: INSTRUCTION FETCH at APIC offset=0x%03x "
-                   "RIP=0x%llx — guest instruction pointer in APIC space!\n",
-                   offset, guest_rip);
-            vcpu->state = VCPU_STATE_STOPPED;
-            return 0;
-
         default:
-            /* Other access types (physical-access subtypes etc.) are not
-             * expected with our setup; treat them as reads so the guest
-             * at least gets a coherent value. */
-            PDEBUG("RELM: APIC: fallback access type=%u offset=0x%03x\n", access_type, offset);
+            /*
+             * Preserve the existing fallback for physical-access subtypes:
+             * treat them as reads, but use the same validated GPR commit path
+             * as an ordinary linear read instead of writing a raw register.
+             */
+            if (decoded.operand_kind != RELM_OPERAND_GPR)
+                return -EINVAL;
+
+            PDEBUG("RELM: APIC: fallback access type=%u offset=0x%03x\n",
+                   access_type, offset);
             ret = relm_apic_read(vcpu, offset, &value);
-            if(ret == 0) {
-                guest_reg_write(&vcpu->arch.regs, decoded.dst_reg, (unsigned long)value);
+            if (ret == 0) {
+                old_gpr = guest_reg_read(&vcpu->arch.regs,
+                                         decoded.gpr_index);
+                guest_reg_write(&vcpu->arch.regs, decoded.gpr_index,
+                                (unsigned long)relm_decoded_gpr_commit(
+                                    &decoded, old_gpr, value));
             }
             break;
     }
@@ -1337,8 +1394,7 @@ int relm_apic_handle_access(struct vcpu *vcpu)
      * RIP, matching the virtio-MMIO path (mmio.c): the VMCS field is what
      * the CPU resumes from, and vcpu->arch.regs.rip keeps the software
      * model (exit tracing, later handlers in this exit) consistent. */
-    vcpu->arch.regs.rip = guest_rip + instr_len;
+    vcpu->arch.regs.rip = guest_rip + decoded.length;
     _vmwrite(GUEST_RIP, vcpu->arch.regs.rip);
     return 1;
 }
-

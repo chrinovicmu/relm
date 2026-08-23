@@ -7,7 +7,6 @@
  * Written by Masami Hiramatsu <mhiramat@redhat.com>
  */
 #include "inat_types.h" /* __ignore_sync_check__ */
-
 /*
  * Internal bits. Don't use bitmasks directly, because these bits are
  * unstable. You should use checking functions.

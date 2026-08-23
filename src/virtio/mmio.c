@@ -197,70 +197,53 @@ int relm_vm_mmio_region_at(struct relm_vm *vm, unsigned int index,
     return 0;
 }
  
-/*
- * relm_virtio_mmio_handle_ept_violation() — emulate one guest access to a
- * virtio-mmio device. Called from the EPT-violation exit handler once the
- * faulting GPA is known to be MMIO; the region is unmapped in EPT, so the
- * hardware could not complete the access and tells us only the address —
- * direction, width, value and register all have to be recovered by
- * decoding the faulting instruction (same technique as
- * relm_apic_handle_access in vmx/apic.c).
- *
- * Flow:
- *   1. find which registered virtio device owns fault_gpa (not ours →
- *      return false, caller decides what an unclaimed MMIO fault means);
- *   2. fetch the instruction bytes at the guest RIP and decode them;
- *   3. writes: mask the source GPR or immediate to the operand size and
- *      hand it to the device model; reads: ask the device model, then
- *      write the result back into the destination GPR with the
- *      architecturally-correct extension for the width;
- *   4. inject the device IRQ if the register access requires one;
- *   5. advance RIP past the instruction and resume.
- *
- * Returns true = handled, resume guest; false = unhandled, caller stops
- * the vCPU (returning true without making progress would re-fault the
- * same instruction forever).
- */
 bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu,
                                            uint64_t fault_gpa)
 {
     struct relm_virtio_device *dev;
     uint8_t insn_buf[16];
     struct relm_decoded_insn decoded;
-    uint64_t guest_rip, guest_linear; 
-    unsigned int offset; 
+    uint64_t guest_rip, guest_linear;
+    unsigned int offset;
     uint32_t value = 0; 
+    unsigned long old_gpr;
     bool needs_irq = false; 
-    int n, ret; 
+    int gpr_index = -1;
+    int n, ret;
 
-    /* Which virtio device owns this GPA? None → not our fault to handle. */
+    /* Which virtio device owns this GPA? None → not our fault to handle.
+     * fault_gpa is the hardware-translated DATA address (see header
+     * comment) — already physical, already the address space the device
+     * registry is keyed in, so it is compared against mmio_base_gpa
+     * ranges directly. */
     dev = relm_virtio_find_device_for_gpa(vcpu->vm, fault_gpa);
     if(!dev)
         return false;
 
     /* Byte offset into the device's register window = which virtio-mmio
-     * register (MagicValue, DeviceID, QueueNotify, ...) was touched. */
+     * register (MagicValue, DeviceID, QueueNotify, ...) was touched.
+     * Plain GPA arithmetic — both operands are physical. */
     offset = (unsigned int)(fault_gpa - dev->mmio_base_gpa);
+
     guest_rip = vcpu->arch.regs.rip;
 
-    guest_linear = relm_mmu_rip_to_linear(vcpu, guest_rip); 
+    guest_linear = relm_mmu_rip_to_linear(vcpu, guest_rip);
     {
-        size_t first = min(sizeof(insn_buf), 
-                           (size_t)(PAGE_SIZE - 
-                           (guest_linear & ~PAGE_MASK))); 
+        size_t first = min(sizeof(insn_buf),
+                           (size_t)(PAGE_SIZE - (guest_linear & ~PAGE_MASK)));
 
-        n  = relm_mmu_copy_from_guest_virt(vcpu, guest_linear, 
-                                           insn_buf, first); 
-        if(n > 0 && first < sizeof(insn_buf)){
-            int n2 = relm_mmu_copy_from_guest_virt(vcpu, 
-                                                   guest_linear + first, 
-                                                   insn_buf + first, 
-                                                   sizeof(insn_buf) - first); 
-            if(n2 > 0)
-                n += 2; 
+        n = relm_mmu_copy_from_guest_virt(vcpu, guest_linear,
+                                          insn_buf, first);
+        if (n > 0 && first < sizeof(insn_buf)) {
+            int n2 = relm_mmu_copy_from_guest_virt(vcpu,
+                                                   guest_linear + first,
+                                                   insn_buf + first,
+                                                   sizeof(insn_buf) - first);
+            if (n2 > 0)
+                n += n2;
         }
     }
-    
+
     if (n < 0) {
         pr_err("RELM: virtio-mmio: VCPU%d: failed to fetch instruction "
                "bytes at RIP 0x%llx (linear 0x%llx, n=%d)\n",
@@ -270,8 +253,6 @@ bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu,
         return false;
     }
 
-    /* Decode → direction, operand size, GPR indices, immediate. On
-     * success ret is the instruction length, used below to advance RIP. */
     ret = relm_decode_instruction(insn_buf, n, &decoded);
     if (ret < 0) {
         pr_err("RELM: virtio-mmio: VCPU%d: failed to decode instruction "
@@ -280,63 +261,59 @@ bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu,
         return false;
     }
 
-    /* GPR table — pointer type must match the regs fields (unsigned long),
-     * which differs from uint64_t* under the kernel's
-     * -Werror=incompatible-pointer-types even though widths agree */
-    unsigned long *gpr_table[16] = {
-        &vcpu->arch.regs.rax, &vcpu->arch.regs.rcx,
-        &vcpu->arch.regs.rdx, &vcpu->arch.regs.rbx,
-        &vcpu->arch.regs.rsp, &vcpu->arch.regs.rbp,
-        &vcpu->arch.regs.rsi, &vcpu->arch.regs.rdi,
-        &vcpu->arch.regs.r8,  &vcpu->arch.regs.r9,
-        &vcpu->arch.regs.r10, &vcpu->arch.regs.r11,
-        &vcpu->arch.regs.r12, &vcpu->arch.regs.r13,
-        &vcpu->arch.regs.r14, &vcpu->arch.regs.r15,
-    };
-
-    /* The GPR that matters: writes take their value FROM src_reg, reads
-     * deposit their result INTO dst_reg. */
-    int gpr_index = decoded.is_write ? decoded.src_reg : decoded.dst_reg;
-
-    /* immediate stores (e.g. 0xC7 MOV imm->mem) carry no source GPR, so
-     * skip GPR-index validation for that path */
-    if (!(decoded.is_write && decoded.is_immediate) &&
-        (gpr_index < 0 || gpr_index >= 16)) {
-        pr_warn("RELM: virtio-mmio: VCPU%d: invalid GPR index %d\n",
-                vcpu->vpid, gpr_index);
+    /*
+     * Virtio-MMIO registers are 32-bit and naturally aligned. The device
+     * model below exchanges a uint32_t and has no byte-enable interface, so a
+     * byte/word/qword instruction could not be emulated precisely. Reject it
+     * instead of silently widening, truncating, or addressing the wrong
+     * register. Normal Linux readl()/writel() accesses satisfy both checks.
+     */
+    if (decoded.memory_width != sizeof(value) || (offset & 3U)) {
+        pr_warn("RELM: virtio-mmio: VCPU%d: unsupported access width=%u "
+                "or unaligned offset=0x%x for device '%s'\n",
+                vcpu->vpid, decoded.memory_width, offset, dev->name);
         return false;
     }
 
-    if (decoded.is_write)
-    {
-        /* Guest stores to the device register. Truncate the source to the
-         * decoded operand width before handing it to the device model. */
-        uint64_t mask = (decoded.op_size == 4) ? 0xFFFFFFFFULL
-                      : (decoded.op_size == 2) ? 0xFFFFULL
-                      : 0xFFULL;
+    if (decoded.operand_kind == RELM_OPERAND_GPR) {
+        if (!relm_decoded_has_valid_gpr(&decoded)) {
+            pr_warn("RELM: virtio-mmio: VCPU%d: invalid decoded GPR %d\n",
+                    vcpu->vpid, decoded.gpr_index);
+            return false;
+        }
+        gpr_index = decoded.gpr_index;
+    }
 
-        if (decoded.is_immediate)
-            value = (uint32_t)(decoded.immediate & mask);
-        else
-            value = (uint32_t)(*gpr_table[gpr_index] & mask);
+    if (decoded.memory_access == RELM_MEMORY_ACCESS_WRITE) {
+        /*
+         * A store's value is either embedded in the instruction or extracted
+         * from the exact decoded register lane. The helper matters even though
+         * virtio currently accepts only dword transfers: it keeps register
+         * semantics centralized and makes future device widths safe by
+         * construction.
+         */
+        if (decoded.operand_kind == RELM_OPERAND_IMMEDIATE) {
+            value = (uint32_t)(decoded.immediate &
+                               relm_width_mask(decoded.memory_width));
+        } else if (decoded.operand_kind == RELM_OPERAND_GPR) {
+            old_gpr = guest_reg_read(&vcpu->arch.regs, gpr_index);
+            value = (uint32_t)relm_decoded_gpr_extract(&decoded, old_gpr);
+        } else {
+            return false;
+        }
 
         relm_virtio_mmio_register_access(dev, offset, true, &value, &needs_irq);
-    }else{
-        /* Guest loads from the device register: the device model fills
-         * 'value', then we deposit it in the destination GPR. */
-        relm_virtio_mmio_register_access(dev, offset, false, &value, &needs_irq);
+    } else if (decoded.memory_access == RELM_MEMORY_ACCESS_READ) {
+        if (decoded.operand_kind != RELM_OPERAND_GPR)
+            return false;
 
-        /* Write back with the architecturally-correct extension:
-         * a 32-bit mov zero-extends into the full 64-bit register;
-         * 16- and 8-bit movs merge into the low bits and leave the rest
-         * of the register untouched. */
-        if (decoded.op_size == 4) {
-            *gpr_table[gpr_index] = (uint64_t)value;
-        } else if (decoded.op_size == 2) {
-            *gpr_table[gpr_index] = (*gpr_table[gpr_index] & ~0xFFFFULL) | (value & 0xFFFFULL);
-        } else {
-            *gpr_table[gpr_index] = (*gpr_table[gpr_index] & ~0xFFULL) | (value & 0xFFULL);
-        }
+        relm_virtio_mmio_register_access(dev, offset, false, &value, &needs_irq);
+        old_gpr = guest_reg_read(&vcpu->arch.regs, gpr_index);
+        guest_reg_write(&vcpu->arch.regs, gpr_index,
+                        (unsigned long)relm_decoded_gpr_commit(
+                            &decoded, old_gpr, value));
+    } else {
+        return false;
     }
 
     if (needs_irq) {
@@ -353,17 +330,18 @@ bool relm_virtio_mmio_handle_ept_violation(struct vcpu *vcpu,
                     vcpu->vpid, dev->irq, irq_ret, dev->name);
     }
 
-    /* Step the guest past the emulated instruction ('ret' still holds the
-     * decoded length). Both copies of RIP are updated: the VMCS field is
-     * what the CPU actually resumes from; vcpu->arch.regs.rip keeps the
-     * software model consistent for tracing and later handlers. */
-    vcpu->arch.regs.rip = guest_rip + (unsigned int)ret;
+    /* Step the guest past the emulated instruction using the length stored in
+     * the validated decoder contract. Both copies of RIP are updated: the
+     * VMCS field is what the CPU actually resumes from; vcpu->arch.regs.rip
+     * keeps the software model consistent for tracing and later handlers. */
+    vcpu->arch.regs.rip = guest_rip + decoded.length;
     CHECK_VMWRITE(GUEST_RIP, vcpu->arch.regs.rip);
 
     PDEBUG("RELM: virtio-mmio: VCPU%d: '%s' %s offset 0x%x size=%u "
            "gpr=%d value=0x%x, RIP 0x%llx -> 0x%llx\n",
-           vcpu->vpid, dev->name, decoded.is_write ? "write" : "read",
-           offset, decoded.op_size, gpr_index, value,
+           vcpu->vpid, dev->name,
+           decoded.memory_access == RELM_MEMORY_ACCESS_WRITE ? "write" : "read",
+           offset, decoded.memory_width, gpr_index, value,
            guest_rip, vcpu->arch.regs.rip);
 
     return true;

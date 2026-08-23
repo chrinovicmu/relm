@@ -4,21 +4,11 @@
  *
  * Written by Masami Hiramatsu <mhiramat@redhat.com>
  */
-#include <include/arch/x86/decoder/insn.h> /* __ignore_sync_check__ */
+#include "inat.h" 
+#include "insn.h"
 
-/* Attribute tables are generated from opcode map.
- *
- * MANUAL BLOCKER: inat-tables.c is a GENERATED file that is NOT present in
- * this tree. It must be generated from the Linux kernel source and placed
- * at include/arch/x86/decoder/inat-tables.c before this file will link
- * (all inat_*_table symbols are defined there). Generate it with:
- *
- *   awk -f arch/x86/tools/gen-insn-attr-x86.awk \
- *       arch/x86/lib/x86-opcode-map.txt > inat-tables.c
- *
- * Do NOT delete this include — the decoder cannot function without it.
- */
-#include <include/arch/x86/decoder/inat-tables.c>
+/* Attribute tables are generated from opcode map */
+#include "inat-tables.c"
 
 /* Attribute search APIs */
 insn_attr_t inat_get_opcode_attribute(insn_byte_t opcode)
@@ -80,7 +70,7 @@ insn_attr_t inat_get_avx_attribute(insn_byte_t opcode, insn_byte_t vex_m,
 	if (vex_m > X86_VEX_M_MAX || vex_p > INAT_LSTPFX_MAX)
 		return 0;
 	/* At first, this checks the master table */
-	table = inat_avx_tables[map_select][0];
+	table = inat_avx_tables[vex_m][0];
 	if (!table)
 		return 0;
 	if (!inat_is_group(table[opcode]) && vex_p) {
@@ -100,9 +90,8 @@ insn_attr_t inat_get_xop_attribute(insn_byte_t opcode, insn_byte_t map_select)
 		return 0;
 	map_select -= X86_XOP_M_MIN;
 	/* At first, this checks the master table */
-	table = inat_avx_tables[map_select];
+	table = inat_xop_tables[map_select];
 	if (!table)
 		return 0;
 	return table[opcode];
 }
-

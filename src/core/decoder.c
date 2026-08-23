@@ -12,14 +12,6 @@
 #include <linux/errno.h>
 #include <relm/decoder.h>
 
-/*
- * relm_decode_instruction() — decode 'len' instruction bytes from insn_buf
- * into *out. Pure compile-time dispatch: the CONFIG_* of the build host
- * selects the backend, so there is zero runtime cost. Returns the decoded
- * instruction length (>0) on success — callers add it to the guest RIP to
- * step past the emulated instruction — or negative errno on failure.
- * -ENOSYS when built for an arch with no decoder backend.
- */
 int relm_decode_instruction(const uint8_t *insn_buf, int len,
                             struct relm_decoded_insn *out)
 {
