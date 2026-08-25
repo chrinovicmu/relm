@@ -805,21 +805,6 @@ static int relm_setup_io_bitmap(struct vcpu *vcpu)
 
     vcpu->arch.io_bitmap_pa = virt_to_phys(vcpu->arch.io_bitmap); 
     
-    /*write the address to the VMCS */ 
-    if(_vmwrite(VMCS_IO_BITMAP_A, vcpu->arch.io_bitmap_pa) != 0)
-    {
-        PDEBUG("VMWrite VMCS_IO_BITMAP_A failed\n");
-        relm_free_io_bitmap(vcpu); 
-        return -EIO; 
-    }
-
-    if(_vmwrite(VMCS_IO_BITMAP_B, vcpu->arch.io_bitmap_pa + VMCS_IO_BITMAP_SIZE) != 0)
-    {
-        PDEBUG("VMWrite VMCS_IO_BITMAP_B failed\n"); 
-        relm_free_io_bitmap(vcpu); 
-        return -EIO; 
-    }
-
     PDEBUG("IO bitmap A physical address : 0x%llx\nIO bitmap B physical address : 0x%llx\n", 
            vcpu->arch.io_bitmap_pa, 
            vcpu->arch.io_bitmap_pa + VMCS_IO_BITMAP_SIZE); 
@@ -876,12 +861,6 @@ static int relm_setup_msr_bitmap(struct vcpu *vcpu)
     uint32_t byte = msr_index / 8;
     uint8_t bit = msr_index % 8; 
     bitmap[byte] |= (1 << bit); 
-
-
-    if(_vmwrite(VMCS_MSR_BITMAP, vcpu->arch.msr_bitmap_pa) != 0){
-        relm_free_msr_bitmap(vcpu); 
-        return -EIO; 
-    }
 
     return 0; 
 }
@@ -1013,23 +992,8 @@ static int relm_setup_msr_areas(struct vcpu *vcpu,
     vcpu->arch.vmexit_count  = vmexit_count;
     vcpu->arch.vmentry_count = vmentry_count;
 
-    if (_vmwrite(VMCS_EXIT_MSR_STORE_ADDR, vcpu->arch.vmexit_store_pa) ||
-        _vmwrite(VMCS_EXIT_MSR_STORE_COUNT, (uint64_t)vmexit_count) ||
-        _vmwrite(VMCS_EXIT_MSR_LOAD_ADDR,   vcpu->arch.vmexit_load_pa) ||
-        _vmwrite(VMCS_EXIT_MSR_LOAD_COUNT,  (uint64_t)vmentry_count) ||
-        _vmwrite(VMCS_ENTRY_MSR_LOAD_ADDR,  vcpu->arch.vmentry_load_pa) ||
-        _vmwrite(VMCS_ENTRY_MSR_LOAD_COUNT, (uint64_t)vmentry_count)) 
-    {
-        rc = -EIO;
-        goto _out_free_all;
-    }
 
     return 0;
-
-_out_free_all:
-    free_msr_area(vcpu->arch.vmentry_load_area, vmentry_count);
-    vcpu->arch.vmentry_load_area = NULL;
-    vcpu->arch.vmentry_load_pa = 0;
 
 _out_free_exit_load:
     free_msr_area(vcpu->arch.vmexit_load_area, vmentry_count);
