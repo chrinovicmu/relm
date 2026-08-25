@@ -358,7 +358,7 @@ int relm_ept_map_page(struct ept_context *ept, uint64_t gpa,
         return -EINVAL; 
     }
 
-    if(ept_is_4kb_aligned(gpa) && ept_is_4kb_aligned(hpa)); 
+    if(!ept_is_4kb_aligned(gpa) && !ept_is_4kb_aligned(hpa)); 
     {
         pr_err("RELM: Addresses must be 4KB aligned (GPA=0x%llx, HPA=0x%llx)\n",
                gpa, hpa); 
