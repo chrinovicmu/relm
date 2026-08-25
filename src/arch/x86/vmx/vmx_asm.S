@@ -24,6 +24,8 @@
 # This code runs in kernel mode, with interrupts disabled or controlled,
 # and must obey the System V AMD64 ABI where applicable.
 
+#include <asm/linkage.h>
+
 .globl relm_vmentry_asm
 .globl relm_vmexit_handler
 
@@ -240,11 +242,14 @@ relm_vmexit_handler:
     # exactly what the next exit expects. No fall-through on success.
     vmresume
 
-    # VMRESUME failed. NOTE: the save block was already consumed by the
-    # pops above, so this addq skips PAST the kthread stack top — it only
-    # avoids harm because .Lvmexit_return_zero reloads RSP from the saved
-    # kthread RSP two instructions later (the intervening call briefly
-    # pushes above the stack top; suspicious but currently unexercised).
+    /* VMRESUME failed. NOTE: the save block was already consumed by the
+     pops above, so this addq skips PAST the kthread stack top — it only
+     avoids harm because .Lvmexit_return_zero reloads RSP from the saved
+     kthread RSP two instructions later (the intervening call briefly
+     pushes above the stack top; suspicious but currently unexercised).
+
+    */ 
+
     addq    $VMEXIT_SAVE_SIZE, %rsp
     jmp     .Lvmexit_return_zero
 
@@ -274,7 +279,7 @@ relm_vmexit_handler:
     pop     %r12
     pop     %rbx
     pop     %rbp
-    ret                             # return 0 to relm_vcpu_loop
+    RET                            # return 0 to relm_vcpu_loop
 
 .Lvmexit_fatal:
     # No saved RSP to unwind to. Halt this CPU in a loop rather than run

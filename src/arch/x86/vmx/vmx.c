@@ -377,7 +377,7 @@ void relm_vmx_disable_on_all_cpus(void)
 }
 
 /*pin vcpu thread to a specific physical host cpu for cpu affinity
-*/  
+*  
 int relm_vcpu_pin_to_cpu(struct vcpu *vcpu, int target_cpu_id)
 {
     int ret;
@@ -410,8 +410,8 @@ int relm_vcpu_pin_to_cpu(struct vcpu *vcpu, int target_cpu_id)
     cpumask_clear(&new_mask); 
     cpumask_set_cpu(target_cpu_id, &new_mask); 
 
-    /* restrict task to target_cpu_id only. if we are not currently on that
-     * CPU the scheduler will migrate us on the next preemption point. */
+    * restrict task to target_cpu_id only. if we are not currently on that
+     * CPU the scheduler will migrate us on the next preemption point. 
     ret = set_cpus_allowed_ptr(vcpu->host_task, &new_mask);
     if(ret != 0)
     {
@@ -433,8 +433,9 @@ int relm_vcpu_pin_to_cpu(struct vcpu *vcpu, int target_cpu_id)
 
     return ret; 
 }
+*/ 
 
-
+/*
 void relm_vcpu_unpin_and_stop(struct vcpu *vcpu)
 {
     if(!vcpu || !vcpu->host_task)
@@ -445,6 +446,7 @@ void relm_vcpu_unpin_and_stop(struct vcpu *vcpu)
     set_cpus_allowed_ptr(vcpu->host_task, cpu_online_mask);
     kthread_stop(vcpu->host_task);
 }
+*/
 
 /*IO bitmap bit in the execution controls need to be set in order to use io bimaps*/ 
 static inline bool relm_vcpu_io_bitmap_enabled(struct vcpu *vcpu)
