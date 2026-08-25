@@ -790,7 +790,7 @@ static int relm_setup_io_bitmap(struct vcpu *vcpu)
     if(!vcpu)
         return -EINVAL;
 
-    size_t total_bitmap_size = 2 * VMCS_IO_BITMAP_SIZE;
+    size_t total_bitmap_size = 2 * VMCS_IO_BITMAP_PAGE_SIZE;
 
     vcpu->arch.io_bitmap = (uint8_t *)__get_free_pages(GFP_KERNEL,
                                                    get_order(total_bitmap_size));

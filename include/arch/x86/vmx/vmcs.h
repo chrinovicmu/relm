@@ -121,7 +121,7 @@
 /* Memory Management Constants */
 #define VMCS_IO_BITMAP_PAGE_SIZE    4096
 #define VMCS_IO_BITMAP_PAGES_ORDER  1 
-#define VMCS_IO_BITMAP_SIZE         (VMCS_IO_BITMAP_PAGE_SIZE << VMCS_IO_BITMAP_PAGES_ORDER)
+#define VMCS_IO_BITMAP_SIZE         4096 
 
 /* Struct Definitions */
 struct vmcs_region {
