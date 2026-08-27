@@ -102,10 +102,14 @@ VIRTIO_OBJS := \
 GUEST_OBJS := \
     guest/guest_kernel_embed.o
 
+DEBUG_OBJS := \
+    src/debug/insn_dump.o 
+
 $(MODULE_NAME)-y := \
     $(CORE_OBJS)    \
     $(BOOT_OBJS)    \
     $(VIRTIO_OBJS)  \
+    $(DEBUG_OBJS)   \
     $(ARCH_OBJS)    \
     $(GUEST_OBJS)
 

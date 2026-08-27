@@ -11,6 +11,7 @@
 #include <include/firmware/fw_cfg.h>
 #include <include/firmware/seabios.h>
 #include <include/boot/arch/x86/loader.h>
+#include <include/debug/insn_dump.h>
 #include <utils/utils.h> 
 
 static void svm_advance_rip(struct vcpu *vcpu, unsigned int fallback_len)

@@ -13,6 +13,8 @@
 #include <include/firmware/fw_cfg.h>
 #include <include/firmware/seabios.h> 
 #include <include/boot/arch/x86/loader.h>
+#include <include/debug/insn_dump.h>
+
 #include <utils/utils.h>
 
 #define CREATE_TRACE_POINTS 
@@ -213,6 +215,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
 
     PDEBUG("relm: [VPID=%u] Exit #%llu: reason=%llu RIP=0x%llx\n",
            vcpu->vpid, vcpu->stats.total_exits, exit_reason, guest_rip);
+
+    RELM_DUMP_GUEST_INSN(vcpu, guest_rip);
 
     switch(exit_reason)
     {
