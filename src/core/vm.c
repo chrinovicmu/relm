@@ -504,9 +504,6 @@ int relm_vm_copy_to_guest(struct relm_vm *vm, uint64_t gpa,
             pr_info("RELM: Copied %zu / %zu bytes...\n", copied, size);
         }     
     }
-
-    pr_info("RELM: Successfully copied %zu bytes to guest memory\n",
-            copied);
     return (int)copied; 
 }
 
@@ -532,9 +529,6 @@ int relm_vm_copy_from_guest(struct relm_vm *vm, const uint64_t gpa,
     }
 
     current_gpa = gpa; 
-
-    pr_info("RELM: Copying %zu bytes from guest at GPA 0x%llx\n",
-            size, gpa);
 
     while(copied < size)
     {
