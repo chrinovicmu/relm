@@ -20,6 +20,29 @@
 #define CREATE_TRACE_POINTS 
 #include <include/trace/events/relm.h> 
 
+static void relm_dump_fault_regs(struct vcpu *vcpu, uint64_t guest_rsp)
+{
+    pr_err("relm: [VPID=%u] RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx\n",
+           vcpu->vpid, vcpu->arch.regs.rax, vcpu->arch.regs.rbx,
+           vcpu->arch.regs.rcx, vcpu->arch.regs.rdx);
+    pr_err("relm: [VPID=%u] RSI=0x%llx RDI=0x%llx RBP=0x%llx RSP=0x%llx\n",
+           vcpu->vpid, vcpu->arch.regs.rsi, vcpu->arch.regs.rdi,
+           vcpu->arch.regs.rbp, guest_rsp);
+    pr_err("relm: [VPID=%u] R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx\n",
+           vcpu->vpid, vcpu->arch.regs.r8, vcpu->arch.regs.r9,
+           vcpu->arch.regs.r10, vcpu->arch.regs.r11);
+    pr_err("relm: [VPID=%u] R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx\n",
+           vcpu->vpid, vcpu->arch.regs.r12, vcpu->arch.regs.r13,
+           vcpu->arch.regs.r14, vcpu->arch.regs.r15);
+    pr_err("relm: [VPID=%u] CR0=0x%llx CR3=0x%llx CR4=0x%llx EFER=0x%llx RFLAGS=0x%llx\n",
+           vcpu->vpid,
+           (unsigned long long)__vmread(GUEST_CR0),
+           (unsigned long long)__vmread(GUEST_CR3),
+           (unsigned long long)__vmread(GUEST_CR4),
+           (unsigned long long)__vmread(GUEST_IA32_EFER),
+           (unsigned long long)__vmread(GUEST_RFLAGS));
+}
+
 /*
  * relm_vmentry_save_rsp() — called from relm_vmentry_asm (vmx_asm.S) just
  * before VMLAUNCH/VMRESUME, with the kthread RSP *after* the callee-saved
@@ -253,6 +276,7 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
              * bare metal the machine would reset. Unrecoverable; stop. */
             pr_err("relm: [VPID=%u] Guest triple fault at RIP=0x%llx\n",
                    vcpu->vpid, guest_rip);
+            relm_dump_fault_regs(vcpu, guest_rsp);
             vcpu->state = VCPU_STATE_STOPPED;
             ret = 0;
             break; 
