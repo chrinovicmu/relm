@@ -668,64 +668,28 @@ int relm_npt_get_mapping(struct npt_context *npt, uint64_t gpa, uint64_t *hpa)
  * load into its own CR3: identity-map (GVA == GPA) of the first 1 GiB
  * using 2 MiB large pages, so the boot code can enable long mode.
  */
-
 int relm_npt_create_guest_page_tables(struct relm_vm *vm)
 {
-    uint64_t *pml4;
-    uint64_t *pdpt;
-    uint64_t *pd;
+    uint64_t *buf;
     uint64_t pml4_gpa, pdpt_gpa, pd_gpa;
-    uint64_t pml4_hpa, pdpt_hpa, pd_hpa;
     int i;
+    int ret;
 
     if (!vm || !vm->arch.npt)
         return -EINVAL;
 
+    
     uint64_t pt_base_gpa = vm->memory.total_guest_ram - (3 * PAGE_SIZE);
 
-    /* Host pages that will back those three guest-physical pages. */
-    struct page *pml4_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-    struct page *pdpt_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-    struct page *pd_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+    pr_info("RELM: Creating guest page tables at GPA 0x%llx\n", pt_base_gpa);
 
-    if (!pml4_page || !pdpt_page || !pd_page) {
-        if (pml4_page) __free_page(pml4_page);
-        if (pdpt_page) __free_page(pdpt_page);
-        if (pd_page) __free_page(pd_page);
-        return -ENOMEM;
-    }
-
-    /* Their host-physical addresses — the NPT side of the mapping. */
-    pml4_hpa = PFN_PHYS(page_to_pfn(pml4_page));
-    pdpt_hpa = PFN_PHYS(page_to_pfn(pdpt_page));
-    pd_hpa = PFN_PHYS(page_to_pfn(pd_page));
-
-    /* Their guest-physical addresses — what the guest's entries hold. */
     pml4_gpa = pt_base_gpa;
     pdpt_gpa = pt_base_gpa + PAGE_SIZE;
     pd_gpa = pt_base_gpa + (2 * PAGE_SIZE);
-    
-    /* NPT-map each table page so the guest */
-    relm_npt_map_page(vm->arch.npt, pml4_gpa, pml4_hpa, NPT_RWX);
-    relm_npt_map_page(vm->arch.npt, pdpt_gpa, pdpt_hpa, NPT_RWX);
-    relm_npt_map_page(vm->arch.npt, pd_gpa, pd_hpa, NPT_RWX);
 
-    /* Host-side VAs to fill in the guest's entries. */
-    pml4 = page_address(pml4_page);
-    pdpt = page_address(pdpt_page);
-    pd = page_address(pd_page);
-
-    /*
-     * The guest's entries hold GPAs (its whole address world is
-     * guest-physical).  0x7 = Present | R/W | User — classic PTE bits,
-     * which for once are literally the same constants as our NPT_* set.
-     */
-
-    /* PML4[0] -> PDPT: covers GVA 0 .. 512 GiB. */
-    pml4[0] = pdpt_gpa | 0x7;
-
-    /* PDPT[0] -> PD: covers GVA 0 .. 1 GiB. */
-    pdpt[0] = pd_gpa | 0x7;
+    buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+    if (!buf)
+        return -ENOMEM;
 
     /*
      * PD: 512 entries x 2 MiB = the full 1 GiB, identity-mapped.
@@ -734,15 +698,34 @@ int relm_npt_create_guest_page_tables(struct relm_vm *vm)
      * target 2 MiB frame (i * 2 MiB, hence identity).
      */
     for (i = 0; i < 512; i++)
-        pd[i] = (i * 0x200000ULL) | 0x87;
+        buf[i] = (i * 0x200000ULL) | 0x87;
+    ret = relm_vm_copy_to_guest(vm, pd_gpa, buf, PAGE_SIZE);
+    if (ret < 0)
+        goto _out;
 
-    /* Publish the root for boot code to stuff into the guest's CR3
-     * (on SVM: vmcb->save.cr3). */
+
+    /* PDPT[0] -> PD: covers GVA 0 .. 1 GiB. */
+    memset(buf, 0, PAGE_SIZE);
+    buf[0] = pd_gpa | 0x7;
+    ret = relm_vm_copy_to_guest(vm, pdpt_gpa, buf, PAGE_SIZE);
+    if (ret < 0)
+        goto _out;
+
+    /* PML4[0] -> PDPT: covers GVA 0 .. 512 GiB. */
+    memset(buf, 0, PAGE_SIZE);
+    buf[0] = pdpt_gpa | 0x7;
+    ret = relm_vm_copy_to_guest(vm, pml4_gpa, buf, PAGE_SIZE);
+    if (ret < 0)
+        goto _out;
+
     vm->arch.pml4_gpa = pml4_gpa;
 
     pr_info("RELM: Guest page tables created - PML4_GPA = 0x%llx\n", pml4_gpa);
 
-    return 0;
+    ret = 0;
+_out:
+    kfree(buf);
+    return ret;
 }
 
 int relm_npt_handle_fault(struct vcpu *vcpu, uint64_t gpa, uint64_t error_code)

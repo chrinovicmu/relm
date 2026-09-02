@@ -597,9 +597,6 @@ int relm_vm_copy_from_guest(struct relm_vm *vm, const uint64_t gpa,
         current_gpa += bytes_to_copy; 
     }
 
-    pr_info("RELM: Successfully copied %zu bytes from guest memory\n", 
-            copied);
-
     return (int)copied;
 
 }
