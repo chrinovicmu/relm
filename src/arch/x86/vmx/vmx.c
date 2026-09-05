@@ -712,7 +712,7 @@ static int relm_setup_cr_controls(struct vcpu *vcpu)
      * */
 
     cr0_mask = X86_CR0_PE | X86_CR0_NE | X86_CR0_CD | X86_CR0_NW;
-    cr4_mask = X86_CR4_PAE | X86_CR4_PSE;
+    cr4_mask = X86_CR4_PAE | X86_CR4_PSE | X86_CR4_VMXE;
 
     CHECK_VMWRITE(GUEST_CR0, vcpu->arch.cr0); 
     CHECK_VMWRITE(GUEST_CR4, vcpu->arch.cr4); 
