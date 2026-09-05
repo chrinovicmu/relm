@@ -681,30 +681,33 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             uint32_t cr_num    = (uint32_t)(exit_qualification & CR_ACCESS_CR_NUMBER_MASK);
             uint32_t acc_type  = (uint32_t)(exit_qualification & CR_ACCESS_TYPE_MASK);
  
-            if(cr_num == CR_ACCESS_CR_NUMBER_CR4 &&
-               acc_type == CR_ACCESS_TYPE_WRITE)
+            if(cr_num == CR_ACCESS_CR_NUMBER_CR3 &&
+               (acc_type == CR_ACCESS_TYPE_WRITE || acc_type == CR_ACCESS_TYPE_READ))
+            {
+                ret = relm_cr3_passthrough_handle_exit(vcpu, exit_qualification, acc_type);
+                break;
+            }
+            else if(cr_num == CR_ACCESS_CR_NUMBER_CR4 &&
+                    acc_type == CR_ACCESS_TYPE_WRITE)
             {
                 ret = relm_cr4_write_handle_exit(vcpu, exit_qualification);
-                break; 
+                break;
             }
             else
             {
+                /* CR0, CR8 write, or CR read not yet handled.
+                 * Log and stop the guest. Implement as needed. */
                 pr_err("relm: [VPID=%u] Unhandled CR access "
                        "cr=%u type=%u at RIP=0x%llx\n",
                        vcpu->vpid, cr_num, acc_type >> 4, guest_rip);
                 vcpu->state = VCPU_STATE_STOPPED;
-                ret = 0; 
-                break; 
+                ret = 0;
+                break;
             }
         }
-
         case EXIT_REASON_INVALID_GUEST_STATE:
 
-            /* VM-entry itself failed its guest-state consistency checks
-             * (SDM Vol 3C §26.3): some VMCS guest field combination is
-             * illegal — segment attributes, CR0/CR4 vs mode bits, etc.
-             * A VMCS-programming bug on our side, not a guest bug; dump
-             * everything and stop. */
+            /* VM-entry itself failed */ 
             pr_err("relm: [VPID=%u] Invalid guest state\n", vcpu->vpid);
             pr_err(" Guest RIP: 0x%llx\n", guest_rip);
             pr_err(" Guest RSP: 0x%llx\n", guest_rsp);

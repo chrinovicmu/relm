@@ -2086,6 +2086,33 @@ int relm_cr4_write_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
 
     return 1;
 }
+int relm_cr3_passthrough_handle_exit(struct vcpu *vcpu, uint64_t exit_qual, uint32_t acc_type)
+{
+    uint32_t reg = (uint32_t)((exit_qual & CR_ACCESS_SOURCE_REG_MASK)
+                               >> CR_ACCESS_SOURCE_REG_SHIFT);
+    uint64_t instr_len;
+    uint64_t guest_rip;
+
+    if(reg > 15)
+    {
+        pr_err("RELM: CR3 passthrough: invalid GPR %u in EXIT_QUALIFICATION=0x%llx\n",
+               reg, exit_qual);
+    }
+    else if(acc_type == CR_ACCESS_TYPE_WRITE)
+    {
+        _vmwrite(GUEST_CR3, guest_reg_read(&vcpu->arch.regs, (int)reg));
+    }
+    else
+    {
+        guest_reg_write(&vcpu->arch.regs, (int)reg, __vmread(GUEST_CR3));
+    }
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    guest_rip = __vmread(GUEST_RIP);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+
+    return 1;
+}
 
 void relm_cr3_cache_init(struct cr3_shadow_cache *cache)
 {

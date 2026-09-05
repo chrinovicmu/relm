@@ -37,7 +37,8 @@ struct vcpu;
 #define CR_ACCESS_CR_NUMBER_CR3     3            /* we only handle CR3        */
 #define CR_ACCESS_CR_NUMBER_CR4     4 
 #define CR_ACCESS_TYPE_MASK         0x00000030U  /* bits 5:4  = access type  */
-#define CR_ACCESS_TYPE_WRITE        0x00000000U  /* 00 = MOV to CR           */
+#define CR_ACCESS_TYPE_WRITE        0x00000000U  /* 00 = MOV to CR*/ 
+#define CR_ACCESS_TYPE_READ         0x00000010U 
 #define CR_ACCESS_SOURCE_REG_MASK   0x00000F00U  /* bits 11:8 = source GPR   */
 #define CR_ACCESS_SOURCE_REG_SHIFT  8
  
@@ -117,7 +118,8 @@ int relm_init_vmcs_state(struct vcpu *vcpu);
 void relm_dump_vcpu(struct vcpu *vcpu); 
 
 int relm_cr4_write_handle_exit(struct vcpu *vcpu, uint64_t exit_qual);
-
+int relm_cr3_passthrough_handle_exit(struct vcpu *vcpu, uint64_t exit_qual,
+                                    uint32_t acc_type);
 void relm_cr3_cache_init(struct cr3_shadow_cache *cache); 
 void relm_cr3_cache_record(struct vcpu *vcpu, uint64_t cr3_value);
 void relm_cr3_cache_apply(struct cr3_shadow_cache *cache);
