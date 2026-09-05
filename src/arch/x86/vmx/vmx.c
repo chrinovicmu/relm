@@ -1167,6 +1167,10 @@ static int relm_apply_exec_controls(struct vcpu *vcpu)
     allowed0 = (uint32_t)msr;
     allowed1 = (uint32_t)(msr >> 32);
 
+    pr_info("RELM: PROCBASED_CTLS allowed0=0x%08x allowed1=0x%08x "
+            "(CR3-load-exiting forced=%d, CR3-store-exiting forced=%d)\n",
+            allowed0, allowed1,
+            !!(allowed0 & (1u << 15)), !!(allowed0 & (1u << 16)));
     final = vmx_adjust(controls->vm_exit, allowed0, allowed1);
     CHECK_VMWRITE(VMCS_EXIT_CONTROLS, final);
 
