@@ -681,20 +681,14 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             uint32_t cr_num    = (uint32_t)(exit_qualification & CR_ACCESS_CR_NUMBER_MASK);
             uint32_t acc_type  = (uint32_t)(exit_qualification & CR_ACCESS_TYPE_MASK);
  
-            if(cr_num == CR_ACCESS_CR_NUMBER_CR3 &&
+            if(cr_num == CR_ACCESS_CR_NUMBER_CR4 &&
                acc_type == CR_ACCESS_TYPE_WRITE)
             {
-                /* CR3 write: delegate to the CR3 shadow cache handler.
-                 * It records the new CR3 value, updates VMCS GUEST_CR3,
-                 * advances GUEST_RIP, and potentially promotes hot values
-                 * to suppress future exits. */
-                ret = relm_cr3_cache_handle_exit(vcpu, exit_qualification);
+                ret = relm_cr4_write_handle_exit(vcpu, exit_qualification);
                 break; 
             }
             else
             {
-                /* CR0, CR4, CR8 write, or CR read — not yet handled.
-                 * Log and stop the guest. Implement as needed. */
                 pr_err("relm: [VPID=%u] Unhandled CR access "
                        "cr=%u type=%u at RIP=0x%llx\n",
                        vcpu->vpid, cr_num, acc_type >> 4, guest_rip);

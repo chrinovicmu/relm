@@ -2044,6 +2044,45 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     
 }
 
+int relm_cr4_write_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
+{
+    uint32_t src_reg = (uint32_t)((exit_qual & CR_ACCESS_SOURCE_REG_MASK)
+                                   >> CR_ACCESS_SOURCE_REG_SHIFT);
+    uint64_t requested_cr4;
+    uint64_t fixed0, fixed1;
+    uint64_t instr_len;
+    uint64_t guest_rip;
+
+    if(src_reg > 15)
+    {
+        pr_err("RELM: CR4 exit: invalid source GPR %u in EXIT_QUALIFICATION=0x%llx\n",
+               src_reg, exit_qual);
+        instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+        guest_rip = __vmread(GUEST_RIP);
+        _vmwrite(GUEST_RIP, guest_rip + instr_len);
+        return 1;
+    }
+
+    requested_cr4 = guest_reg_read(&vcpu->arch.regs, (int)src_reg);
+
+    fixed0 = __rdmsr1(MSR_IA32_VMX_CR4_FIXED0);
+    fixed1 = __rdmsr1(MSR_IA32_VMX_CR4_FIXED1);
+    vcpu->arch.cr4 = (requested_cr4 | fixed0) & fixed1;
+
+    _vmwrite(GUEST_CR4, vcpu->arch.cr4);
+    CHECK_VMWRITE(CR4_READ_SHADOW, vcpu->arch.cr4 & ~X86_CR4_VMXE);
+
+    PDEBUG("RELM: CR4 exit: requested=0x%llx applied=0x%llx from GPR%u\n",
+           requested_cr4, vcpu->arch.cr4, src_reg);
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    guest_rip = __vmread(GUEST_RIP);
+
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+
+    return 1;
+}
+
 void relm_cr3_cache_init(struct cr3_shadow_cache *cache)
 {
     memset(cache, 0, sizeof(*cache));
