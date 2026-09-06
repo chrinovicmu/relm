@@ -103,7 +103,8 @@ GUEST_OBJS := \
     guest/guest_kernel_embed.o
 
 DEBUG_OBJS := \
-    src/debug/insn_dump.o 
+    src/debug/insn_dump.o \
+	src/debug/page_fault.o 
 
 $(MODULE_NAME)-y := \
     $(CORE_OBJS)    \

@@ -14,7 +14,7 @@
 #include <include/firmware/seabios.h> 
 #include <include/boot/arch/x86/loader.h>
 #include <include/debug/insn_dump.h>
-
+#include <include/debug/page_fault.h> 
 #include <utils/utils.h>
 
 #define CREATE_TRACE_POINTS 
@@ -132,6 +132,17 @@ uint64_t relm_vmentry_get_rsp(void)
            vcpu->vpid, vcpu->arch.vmentry_host_rsp, smp_processor_id());
  
     return vcpu->arch.vmentry_host_rsp;
+}
+
+int relm_arch_get_page_fault_info(struct vcpu *vcpu, uint64_t *out_cr2,
+                                  uint32_t *out_error_code)
+{
+    (void)vcpu;
+
+    *out_cr2 = _read_cr2();
+    *out_error_code = __vmread(VM_EXIT_INTR_ERROR_CODE);
+
+    return 0;
 }
 
 /*
@@ -255,6 +266,10 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
 
             pr_err("relm: [VPID=%u] Guest exception: vector=%u type=%u at RIP=0x%llx\n",
                    vcpu->vpid, vector, intr_type, guest_rip);
+
+            if(vector == 14 && (intr_info & (1u << 11)))
+                relm_dump_page_fault(vcpu, guest_rip);
+
 
             /*treat all exceptions as fatal */
             vcpu->state = VCPU_STATE_STOPPED;
