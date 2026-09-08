@@ -13,6 +13,7 @@
 #include <include/firmware/fw_cfg.h>
 #include <include/firmware/seabios.h> 
 #include <include/boot/arch/x86/loader.h>
+#include <include/arch/x86/vmx/mmu.h> 
 #include <include/debug/insn_dump.h>
 #include <include/debug/page_fault.h> 
 #include <utils/utils.h>
@@ -42,7 +43,11 @@ static void relm_dump_fault_regs(struct vcpu *vcpu, uint64_t guest_rsp)
            (unsigned long long)__vmread(GUEST_IA32_EFER),
            (unsigned long long)__vmread(GUEST_RFLAGS));
 }
-
+int relm_arch_translate_gva_to_gpa(struct vcpu *vcpu, uint64_t gva,
+                                   uint64_t *out_gpa)
+{
+    return relm_mmu_gva_to_gpa(vcpu, gva, out_gpa);
+}
 /*
  * relm_vmentry_save_rsp() — called from relm_vmentry_asm (vmx_asm.S) just
  * before VMLAUNCH/VMRESUME, with the kthread RSP *after* the callee-saved
