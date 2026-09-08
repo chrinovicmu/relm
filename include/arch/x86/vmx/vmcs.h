@@ -84,11 +84,12 @@
 /* =======================
  * Secondary Processor-Based Controls
  * ======================= */
-#define VMCS_PROC2_ENABLE_EPT         (1u << 1)
-#define VMCS_PROC2_RDTSCP             (1u << 3)
-#define VMCS_PROC2_VPID               (1u << 5)
-#define VMCS_PROC2_UNRESTRICTED_GUEST (1u << 7)
-#define VMCS_PROC2_ENABLE_VMFUNC      (1u << 13)
+#define VMCS_PROC2_ENABLE_EPT           (1u << 1)
+#define VMCS_PROC2_RDTSCP               (1u << 3)
+#define VMCS_PROC2_VPID                 (1u << 5)
+#define VMCS_PROC2_UNRESTRICTED_GUEST   (1u << 7)
+#define VMCS_PROC2_ENABLE_INVPCID       (1u << 12)
+#define VMCS_PROC2_ENABLE_VMFUNC        (1u << 13)
 
 /* =======================
  * VM-Exit Controls

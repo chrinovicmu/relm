@@ -1104,6 +1104,7 @@ static void relm_init_exec_controls(struct vcpu *vcpu)
     controls->secondary_proc = 
         VMCS_PROC2_ENABLE_EPT |
         VMCS_PROC2_RDTSCP | 
+        VMCS_PROC2_ENABLE_INVPCID | 
         VMCS_PROC2_UNRESTRICTED_GUEST |
         VMCS_PROC2_ENABLE_VMFUNC; 
 
