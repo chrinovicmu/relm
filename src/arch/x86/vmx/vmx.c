@@ -1265,7 +1265,7 @@ static int vmx_vcpu_alloc(struct vcpu *vcpu)
 
     /* Exception bitmap: intercept #UD(6) and #PF(14).
      * Written to VMCS in Phase 2 (vmx_vcpu_init). */
-    vcpu->arch.exception_bitmap = (1U << 6) | (1U << 14);
+    vcpu->arch.exception_bitmap = 0;
 
     relm_disable_page_fault_intercept(vcpu); 
     relm_disable_ud_intercept(vcpu); 
