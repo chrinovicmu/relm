@@ -72,21 +72,41 @@ void relm_vmentry_save_rsp(uint64_t rsp)
     PDEBUG("RELM: VCPU%d: kthread RSP 0x%llx saved before VM-entry on CPU%d\n",
            vcpu->vpid, rsp, smp_processor_id());
 }
-/*
- * emulate_cpuid() — handle a guest CPUID (unconditionally exiting
- * instruction). Passthrough model: execute the real CPUID on the host
- * with the guest's leaf (RAX) and subleaf (RCX) and hand the host's
- * answer straight back. No filtering yet — the guest sees host CPU
- * features verbatim, including ones we do not virtualise (TODO: mask
- * feature bits such as VMX itself, x2APIC, etc. as emulation grows).
- */
+
+#define RELM_KVM_CPUID_SIGNATURE   0x40000000
+#define RELM_KVM_CPUID_FEATURES    0x40000001
+
+static void relm_handle_kvm_cpuid_leaf(uint32_t leaf, uint32_t *eax,
+                                       uint32_t *ebx, uint32_t *ecx,
+                                       uint32_t *edx)
+{
+    switch (leaf) {
+    case RELM_KVM_CPUID_SIGNATURE:
+        *eax = RELM_KVM_CPUID_FEATURES; /* max supported KVM leaf */
+        *ebx = 0x4b4d564b;               /* "KVMK" */
+        *ecx = 0x564b4d56;               /* "VMKV" */
+        *edx = 0x0000004d;               /* "M\0\0\0" */
+        break;
+
+    case RELM_KVM_CPUID_FEATURES:
+        /* No KVM paravirt feature actually emulated yet — advertise none. */
+        *eax = 0;
+        *ebx = 0;
+        *ecx = 0;
+        *edx = 0;
+        break;
+
+    default:
+        break; 
+    }
+}
+
 static void emulate_cpuid(struct vcpu *vcpu)
 {
     uint32_t leaf, subleaf;
     uint32_t eax, ebx, ecx, edx;
 
-    /* guest inputs */
-    leaf    = (uint32_t)vcpu->arch.regs.rax;
+    leaf = (uint32_t)vcpu->arch.regs.rax;
     subleaf = (uint32_t)vcpu->arch.regs.rcx;
 
     asm volatile(
@@ -96,25 +116,14 @@ static void emulate_cpuid(struct vcpu *vcpu)
         : "memory"
     );
 
-    /* log BEFORE state mutation (avoids confusion during tracing) */
-    PDEBUG("cpuid leaf=0x%x subleaf=0x%x -> eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x\n",
-           leaf, subleaf, eax, ebx, ecx, edx);
+    relm_handle_kvm_cpuid_leaf(leaf, &eax, &ebx, &ecx, &edx);
 
-    /* vcpu->arch.regs is the single place handlers write guest registers;
-     * handle_vmexit copies it back into the on-stack GPR save block that
-     * the VM-exit stub pops before VMRESUME. */
     vcpu->arch.regs.rax = eax;
     vcpu->arch.regs.rbx = ebx;
     vcpu->arch.regs.rcx = ecx;
     vcpu->arch.regs.rdx = edx;
 }
-/*
- * relm_vmentry_get_rsp() — counterpart of relm_vmentry_save_rsp(): called
- * from the VM-exit stub's stop path (.Lvmexit_return_zero in vmx_asm.S)
- * to retrieve the kthread RSP saved before VM-entry. Returns 0 when there
- * is no current vCPU or nothing was saved; the asm treats 0 as "no stack
- * to unwind to" and halts the CPU instead of jumping to a garbage RSP.
- */
+
 uint64_t relm_vmentry_get_rsp(void)
 {
     struct vcpu *vcpu = relm_get_current_vcpu(); 
