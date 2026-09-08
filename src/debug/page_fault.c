@@ -9,17 +9,6 @@
 #include <relm/vcpu.h>
 #include <relm/vm.h>
 
-/*
- * How many bytes before the faulting RIP to disassemble when a #PF lands
- * OUTSIDE all backed guest RAM (see the else-branch below). There is no
- * known instruction-boundary start to walk forward from — this is a
- * straight-line static disassembly guess, so the first line or two can
- * misdecode if this offset doesn't happen to land on a real instruction
- * boundary (the exact same artifact `objdump -d`/gdb's `x/Ni $pc-N` show
- * for the same reason). It still reliably resyncs onto real instructions
- * within a few bytes, which is enough to see what fed RAX/RDX going into
- * the faulting instruction.
- */
 #define RELM_PAGE_FAULT_INSN_DUMP_WINDOW   0x20
 
 bool relm_page_fault_addr_in_guest_ram(struct vcpu *vcpu, uint64_t gpa,
@@ -74,6 +63,8 @@ void relm_dump_page_fault(struct vcpu *vcpu, uint64_t guest_rip)
            (err & 2) ? "write" : "read",
            (err & 4) ? "user" : "supervisor",
            (err & 0x10) ? " instr-fetch" : "");
+
+    relm_arch_dump_page_fault_regs(vcpu);
 
     ret = relm_arch_translate_gva_to_gpa(vcpu, cr2, &gpa);
     if (ret == -EFAULT) {

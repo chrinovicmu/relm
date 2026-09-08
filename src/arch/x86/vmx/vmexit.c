@@ -149,7 +149,23 @@ int relm_arch_get_page_fault_info(struct vcpu *vcpu, uint64_t *out_cr2,
 
     return 0;
 }
+void relm_arch_dump_page_fault_regs(struct vcpu *vcpu)
+{
+    struct guest_regs *r = &vcpu->arch.regs;
+    uint64_t cr3 = __vmread(GUEST_CR3);
 
+    pr_err("relm: [VPID=%u] #PF regs: RAX=0x%lx RBX=0x%lx RCX=0x%lx RDX=0x%lx\n",
+           vcpu->vpid, r->rax, r->rbx, r->rcx, r->rdx);
+    pr_err("relm: [VPID=%u] #PF regs: RSI=0x%lx RDI=0x%lx RBP=0x%lx RSP=0x%lx\n",
+           vcpu->vpid, r->rsi, r->rdi, r->rbp, r->rsp);
+    pr_err("relm: [VPID=%u] #PF regs: R8=0x%lx R9=0x%lx R10=0x%lx R11=0x%lx\n",
+           vcpu->vpid, r->r8, r->r9, r->r10, r->r11);
+    pr_err("relm: [VPID=%u] #PF regs: R12=0x%lx R13=0x%lx R14=0x%lx R15=0x%lx\n",
+           vcpu->vpid, r->r12, r->r13, r->r14, r->r15);
+    pr_err("relm: [VPID=%u] #PF regs: CR3=0x%llx (live VMREAD, post any "
+           "mov-to-cr3 already retired before the fault)\n",
+           vcpu->vpid, (unsigned long long)cr3);
+}
 /*
  * handle_vmexit() — the C half of VM-exit handling, called by
  * relm_vmexit_handler (vmx_asm.S) with a pointer to the guest GPRs the

@@ -13,6 +13,8 @@ int relm_arch_get_page_fault_info(struct vcpu *vcpu, uint64_t *out_cr2,
 int relm_arch_translate_gva_to_gpa(struct vcpu *vcpu, uint64_t gva,
                                    uint64_t *out_gpa);
 
+void relm_arch_dump_page_fault_regs(struct vcpu *vcpu);
+
 bool relm_page_fault_addr_in_guest_ram(struct vcpu *vcpu, uint64_t gpa,
                                        uint64_t *out_region_start,
                                        uint64_t *out_region_size);
