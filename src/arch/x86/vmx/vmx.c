@@ -848,6 +848,12 @@ static void relm_disable_page_fault_intercept(struct vcpu *vcpu)
     relm_clear_exception_intercept(vcpu, 14); 
 }
 
+static void relm_disable_ud_intercept(struct vcpu *vcpu)
+{
+    relm_clear_exception_intercept(vcpu, 16); 
+}
+
+
 /*MSRs that cause VM exit when accessed by guest */ 
 static int relm_setup_msr_bitmap(struct vcpu *vcpu)
 {
@@ -1262,6 +1268,7 @@ static int vmx_vcpu_alloc(struct vcpu *vcpu)
     vcpu->arch.exception_bitmap = (1U << 6) | (1U << 14);
 
     relm_disable_page_fault_intercept(vcpu); 
+    relm_disable_ud_intercept(vcpu); 
 
     if (relm_vcpu_msr_bitmap_enabled(vcpu)) {
         if (relm_setup_msr_bitmap(vcpu) != 0) {
