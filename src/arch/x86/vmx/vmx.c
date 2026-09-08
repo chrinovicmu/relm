@@ -2055,6 +2055,57 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     
 }
 
+/*
+ * relm_cr0_write_handle_exit() — CR0 write side of EXIT_REASON_CR_ACCESS.
+ * Traps only because a bit in CR0_GUEST_HOST_MASK (vmx_vcpu_init(): PE,
+ * NE, CD, NW) changed value — e.g. Linux's MTRR setup toggling CD/NW
+ * around cache_disable()/cache_enable(). The CPU never actually executed
+ * the guest's MOV (that's what causes the trap in the first place), so
+ * this must write back the FULL requested value's real-register bits
+ * ourselves — both the trapped bits and the passthrough ones (PG, WP,
+ *) exactly mirroring relm_cr4_write_handle_exit() below.
+ */
+int relm_cr0_write_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
+{
+    uint32_t src_reg = (uint32_t)((exit_qual & CR_ACCESS_SOURCE_REG_MASK)
+                                   >> CR_ACCESS_SOURCE_REG_SHIFT);
+    uint64_t requested_cr0;
+    uint64_t fixed0, fixed1;
+    uint64_t instr_len;
+    uint64_t guest_rip;
+
+    if(src_reg > 15)
+    {
+        pr_err("RELM: CR0 exit: invalid source GPR %u in EXIT_QUALIFICATION=0x%llx\n",
+               src_reg, exit_qual);
+        instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+        guest_rip = __vmread(GUEST_RIP);
+        _vmwrite(GUEST_RIP, guest_rip + instr_len);
+        return 1;
+    }
+
+    requested_cr0 = guest_reg_read(&vcpu->arch.regs, (int)src_reg);
+
+    /* Same hardware sanitation as the initial CR0 setup (vmx_vcpu_init):
+     * apply fixed0/fixed1 so any bit this CPU's VMX unit requires fixed
+     * can never be dropped, regardless of what the guest asked for. */
+    fixed0 = __rdmsr1(MSR_IA32_VMX_CR0_FIXED0);
+    fixed1 = __rdmsr1(MSR_IA32_VMX_CR0_FIXED1);
+    vcpu->arch.cr0 = (requested_cr0 | fixed0) & fixed1;
+
+    _vmwrite(GUEST_CR0, vcpu->arch.cr0);
+    CHECK_VMWRITE(CR0_READ_SHADOW, vcpu->arch.cr0);
+
+    PDEBUG("RELM: CR0 exit: requested=0x%llx applied=0x%llx from GPR%u\n",
+           requested_cr0, vcpu->arch.cr0, src_reg);
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    guest_rip = __vmread(GUEST_RIP);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+
+    return 1;
+}
+
 int relm_cr4_write_handle_exit(struct vcpu *vcpu, uint64_t exit_qual)
 {
     uint32_t src_reg = (uint32_t)((exit_qual & CR_ACCESS_SOURCE_REG_MASK)

@@ -100,6 +100,61 @@ static void relm_handle_kvm_cpuid_leaf(uint32_t leaf, uint32_t *eax,
         break; 
     }
 }
+/* relm_handle_cr_access_exit() — main EXIT_REASON_CR_ACCESS dispatcher.
+ * Decodes the CR number + access type out of exit_qualification and hands
+ * off to exactly one per-register handler (relm_cr0_write_handle_exit(),
+ * relm_cr3_passthrough_handle_exit(), relm_cr4_write_handle_exit(),
+ * relm_cr8_access_handle_exit() — all in vmx.c). Each of those owns its
+ * own full handling of that register (read/write semantics, VMCS field
+ * writes, RIP advance) — this function does no register-specific work
+ * itself, only routing.
+ *
+ * A cr_num/acc_type combination with no handler (CR0 read, CR4 read, or
+ * any CLTS/LMSW form of MOV to CR0 — acc_type 2/3, not yet decoded at
+ * all) falls through to the same fatal log-and-stop this always did
+ * before the dispatch table existed: RELM has no fixable-fault path, so
+ * an exit we can't emulate correctly cannot be silently resumed.
+ */
+static int relm_handle_cr_access_exit(struct vcpu *vcpu,
+                                      uint64_t exit_qualification,
+                                      uint64_t guest_rip)
+{
+    uint32_t cr_num   = (uint32_t)(exit_qualification & CR_ACCESS_CR_NUMBER_MASK);
+    uint32_t acc_type = (uint32_t)(exit_qualification & CR_ACCESS_TYPE_MASK);
+
+    switch (cr_num) {
+    case CR_ACCESS_CR_NUMBER_CR0:
+        if (acc_type == CR_ACCESS_TYPE_WRITE)
+            return relm_cr0_write_handle_exit(vcpu, exit_qualification);
+        break;
+
+    case CR_ACCESS_CR_NUMBER_CR3:
+        /* CR3 write or read: no shadow cache, no promotion — just satisfy
+         * the exit (copy the value across) and resume the guest.
+         * CR3-store-exiting (reads) is forced on by this host's VMX
+         * capability MSR and can't be disabled, so both directions need
+         * to be handled here, minimally. */
+        return relm_cr3_passthrough_handle_exit(vcpu, exit_qualification, acc_type);
+
+    case CR_ACCESS_CR_NUMBER_CR4:
+        /* CR4 write: apply the guest's requested value but keep VMXE
+         * forced to 1 in the real register  */
+        if (acc_type == CR_ACCESS_TYPE_WRITE)
+            return relm_cr4_write_handle_exit(vcpu, exit_qualification);
+        break;
+
+  //  case CR_ACCESS_CR_NUMBER_CR8:
+    //    return relm_cr8_access_handle_exit(vcpu, exit_qualification, acc_type);
+
+    default:
+        break;
+    }
+
+    pr_err("relm: [VPID=%u] Unhandled CR access cr=%u type=%u at RIP=0x%llx\n",
+           vcpu->vpid, cr_num, acc_type >> 4, guest_rip);
+    vcpu->state = VCPU_STATE_STOPPED;
+    return 0;
+}
 
 static void emulate_cpuid(struct vcpu *vcpu)
 {
@@ -679,7 +734,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             /*if GPA is in the range the VM has reserved for MMIO */
                 if (relm_vm_gpa_is_mmio_region(vcpu->vm, gpa)) {
 
-                    if (relm_virtio_mmio_handle_ept_violation(vcpu, gpa)) {
+                    ret = relm_handle_cr_access_exit(vcpu, exit_qualification, guest_rip);
+            break; if (relm_virtio_mmio_handle_ept_violation(vcpu, gpa)) {
                         /* MMIO access emulated (the handler advanced RIP past
                          * the faulting instruction). Resume the guest via
                          * VMRESUME. The old code returned 0 = stop, killing the
@@ -723,32 +779,8 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
         
         case EXIT_REASON_CR_ACCESS:
         {
-            uint32_t cr_num    = (uint32_t)(exit_qualification & CR_ACCESS_CR_NUMBER_MASK);
-            uint32_t acc_type  = (uint32_t)(exit_qualification & CR_ACCESS_TYPE_MASK);
- 
-            if(cr_num == CR_ACCESS_CR_NUMBER_CR3 &&
-               (acc_type == CR_ACCESS_TYPE_WRITE || acc_type == CR_ACCESS_TYPE_READ))
-            {
-                ret = relm_cr3_passthrough_handle_exit(vcpu, exit_qualification, acc_type);
-                break;
-            }
-            else if(cr_num == CR_ACCESS_CR_NUMBER_CR4 &&
-                    acc_type == CR_ACCESS_TYPE_WRITE)
-            {
-                ret = relm_cr4_write_handle_exit(vcpu, exit_qualification);
-                break;
-            }
-            else
-            {
-                /* CR0, CR8 write, or CR read not yet handled.
-                 * Log and stop the guest. Implement as needed. */
-                pr_err("relm: [VPID=%u] Unhandled CR access "
-                       "cr=%u type=%u at RIP=0x%llx\n",
-                       vcpu->vpid, cr_num, acc_type >> 4, guest_rip);
-                vcpu->state = VCPU_STATE_STOPPED;
-                ret = 0;
-                break;
-            }
+            ret  = relm_handle_cr_access_exit(vcpu, exit_qualification, guest_rip);
+            break; 
         }
         case EXIT_REASON_INVALID_GUEST_STATE:
 
