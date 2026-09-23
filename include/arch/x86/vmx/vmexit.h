@@ -73,6 +73,7 @@
 #define EXIT_REASON_XSAVES                      0x0000003F
 #define EXIT_REASON_XRSTORS                     0x00000040
 #define EXIT_REASON_PCOMMIT                     0x00000041
+#define EXIT_REASON_XSETBV                      55
 
 extern struct vcpu *relm_get_current_vcpu(void);
 

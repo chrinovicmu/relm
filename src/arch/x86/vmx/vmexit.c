@@ -368,7 +368,7 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
 
         case EXIT_REASON_EXTERNAL_INTERRUPT:
 
-            /* external interrupt arrived while guest was running
+            /* external interrupt arrived ehile guest was running
             * just re-enter the guest */
             PDEBUG("relm: [VPID=%u] External interrupt\n", vcpu->vpid);
             ret = 1;
@@ -827,6 +827,40 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             vcpu->state = VCPU_STATE_ERROR;
             ret = 0;
             break;
+        }
+
+        case EXIT_REASON_XSETBV: 
+        {
+            uint32_t xcr = (uint32_t)vcpu->arch.regs.rcx; 
+            uint32_t val = ((uint64_t)(uint32_t)vcpu->arch.regs.rdx << 32) | 
+                            (uint32_t)vcpu->arch.regs.rax; 
+
+            /*guest must be CPL 0, if not we #GP*/ 
+            if (xcr != 0) {
+                /* Only XCR0 is architecturally defined for this path. */
+                pr_err("relm: [VPID=%u] XSETBV xcr=%u val=0x%llx — unsupported\n",
+                       vcpu->vpid, xcr, val);
+                vcpu->state = VCPU_STATE_STOPPED;
+                ret = 0;
+                break;
+            }
+
+            /* Bit 0 (x87) must stay 1*/  
+            if ((val & 1) == 0) {
+                pr_err("relm: [VPID=%u] XSETBV XCR0 clears x87: 0x%llx\n",
+                       vcpu->vpid, val);
+                vcpu->state = VCPU_STATE_STOPPED;
+                ret = 0;
+                break;
+            }
+
+            vcpu->arch.xcr0 = val;
+
+            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+            _vmwrite(GUEST_RIP, guest_rip + instr_len);
+            ret = 1;
+            break;
+
         }
 
         default:

@@ -141,6 +141,8 @@ struct vcpu_arch {
     unsigned long cr0, cr3, cr4, cr8;
     unsigned long efer;
 
+    uint64_t xcr0; 
+
     struct guest_regs regs; 
 
     /* CR3 shadow cache — avoids redundant VMCS accesses.                  */

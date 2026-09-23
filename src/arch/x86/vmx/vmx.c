@@ -1995,6 +1995,8 @@ static int relm_setup_guest_state_longmode(struct vcpu *vcpu)
     vcpu->arch.cr0 = cr0;
     vcpu->arch.cr4 = cr4;
 
+    vcpu->arch.xcr0 = 0; 
+
     /* VM_ENTRY_LOAD_GUEST_PAT is enabled, so the CPU loads IA32_PAT from this
      * VMCS field on entry. A 0 here would make all guest memory Uncacheable.
      * Use the host's PAT so guest caching matches the reset default. */
