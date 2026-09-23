@@ -2606,6 +2606,23 @@ void relm_cr3_cache_dump(const struct cr3_shadow_cache *cache)
  
 void relm_dump_vcpu(struct vcpu *vcpu)
 {
+    struct guest_regs *r = &vcpu->arch.regs;
+
+    pr_info("\n*** Guest State ***\n\n");
+
+    pr_info("RAX=0x%lx RBX=0x%lx RCX=0x%lx RDX=0x%lx\n",
+            r->rax, r->rbx, r->rcx, r->rdx);
+    pr_info("RSI=0x%lx RDI=0x%lx RBP=0x%lx RSP=0x%lx\n",
+            r->rsi, r->rdi, r->rbp, r->rsp);
+    pr_info("R8 =0x%lx R9 =0x%lx R10=0x%lx R11=0x%lx\n",
+            r->r8, r->r9, r->r10, r->r11);
+    pr_info("R12=0x%lx R13=0x%lx R14=0x%lx R15=0x%lx\n",
+            r->r12, r->r13, r->r14, r->r15);
+    pr_info("RIP=0x%lx RFLAGS=0x%lx (VMCS RIP=0x%lx RSP=0x%lx RFLAGS=0x%lx)\n",
+            r->rip, r->rflags,
+            (unsigned long)__vmread(GUEST_RIP),
+            (unsigned long)__vmread(GUEST_RSP),
+            (unsigned long)__vmread(GUEST_RFLAGS));
     pr_info("\n*** Guest State ***\n\n");     
 
     pr_info("CR0: actual=0x%lx, shadow=0x%lx, mask=0x%lx\n",

@@ -288,6 +288,7 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
         pr_err("relm: [VPID=%u] VM-entry failure in exit handler (reason=0x%llx)\n",
                vcpu->vpid, exit_reason & 0xFFFF);
         relm_dump_vcpu(vcpu); 
+       
         vcpu->state == VCPU_STATE_STOPPED; 
         return 0;
     }
