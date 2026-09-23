@@ -2201,7 +2201,11 @@ int relm_cr3_passthrough_handle_exit(struct vcpu *vcpu, uint64_t exit_qual, uint
     }
     else if(acc_type == CR_ACCESS_TYPE_WRITE)
     {
-        _vmwrite(GUEST_CR3, guest_reg_read(&vcpu->arch.regs, (int)reg));
+        uint64_t new_cr3 = guest_reg_read(&vcpu->arch.regs, (int)reg); 
+
+        /*mask off bit 63 NOFLUSH before write to GUEST_CR3 */ 
+        new_cr3 &= ~(1Ull << 63); 
+        _vmwrite(GUEST_CR3, new_cr3);
     }
     else
     {

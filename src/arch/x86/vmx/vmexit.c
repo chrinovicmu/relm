@@ -115,7 +115,7 @@ static void relm_handle_kvm_cpuid_leaf(uint32_t leaf, uint32_t *eax,
  * before the dispatch table existed: RELM has no fixable-fault path, so
  * an exit we can't emulate correctly cannot be silently resumed.
  */
-static int relm_handle_cr_access_exit(struct vcpu *vcpu,
+static int handle_cr_access(struct vcpu *vcpu,
                                       uint64_t exit_qualification,
                                       uint64_t guest_rip)
 {
@@ -230,6 +230,498 @@ void relm_arch_dump_page_fault_regs(struct vcpu *vcpu)
            "mov-to-cr3 already retired before the fault)\n",
            vcpu->vpid, (unsigned long long)cr3);
 }
+
+static int handle_exception_nmi(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    uint32_t intr_info = __vmread(VM_EXIT_INTR_INFO);
+    uint32_t vector = intr_info & 0xFF;
+    uint32_t intr_type = (intr_info >> 8) & 0x7;
+    bool valid = !!(intr_info & (1U << 31));
+
+    if (valid && intr_type == 2 && vector == 2) {
+        asm volatile("int $2");
+        return 1;
+    }
+
+    pr_err("relm: [VPID=%u] Guest exception: vector=%u type=%u at RIP=0x%llx\n",
+           vcpu->vpid, vector, intr_type, guest_rip);
+
+    if(vector == 14 && (intr_info & (1u << 11)))
+        relm_dump_page_fault(vcpu, guest_rip);
+
+    /*treat all exceptions as fatal */
+    vcpu->state = VCPU_STATE_STOPPED;
+    return 0;
+}
+
+static int handle_external_interrupt(struct vcpu *vcpu)
+{
+    /* external interrupt arrived while guest was running
+    * just re-enter the guest */
+    PDEBUG("relm: [VPID=%u] External interrupt\n", vcpu->vpid);
+    return 1;
+}
+
+static int handle_triple_fault(struct vcpu *vcpu, uint64_t guest_rip,
+                               uint64_t guest_rsp)
+{
+    pr_err("relm: [VPID=%u] Guest triple fault at RIP=0x%llx\n",
+           vcpu->vpid, guest_rip);
+    relm_dump_fault_regs(vcpu, guest_rsp);
+    vcpu->state = VCPU_STATE_STOPPED;
+    return 0;
+}
+
+static int handle_apic_access(struct vcpu *vcpu)
+{
+    return relm_apic_handle_access(vcpu);
+}
+
+static int handle_init_signal(struct vcpu *vcpu)
+{
+    /* INIT arriving at a running vCPU. Proper handling would put
+     * it in wait-for-SIPI (the SMP bring-up dance in apic.c's IPI
+     * TODOs); until then treat as a stop request. */
+    pr_info("relm: [VPID=%u] INIT signal received\n", vcpu->vpid);
+    vcpu->state = VCPU_STATE_STOPPED;
+    return 0;
+}
+
+static int handle_hlt(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    uint64_t instr_len;
+
+    PDEBUG("relm: [VPID=%u] Guest executed HLT at RIP=0x%llx\n",
+            vcpu->vpid, guest_rip);
+
+    /*
+     * HLT is the guest idle path: it expects to resume at the next
+     * instruction once an interrupt is delivered. We advance RIP past
+     * the HLT and mark the vCPU halted, but KEEP state == RUNNING and
+     * return 0 so control unwinds to relm_vcpu_loop, which then sleeps
+     * on the wait queue until an interrupt is injected (or the vCPU is
+     * stopped) and re-enters the guest.
+     */
+    vcpu->halted = true;
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+
+    return 0;
+}
+
+static int handle_cpuid(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    uint64_t instr_len;
+
+    emulate_cpuid(vcpu);
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+    return 1;
+}
+
+static int handle_io_instruction(struct vcpu *vcpu, uint64_t guest_rip,
+                                 uint64_t exit_qualification)
+{
+    uint64_t instr_len;
+    int ret;
+
+    uint32_t size = (uint32_t)(exit_qualification & 0x7ULL) + 1;
+    bool is_in = (exit_qualification & (1ULL << 3)) != 0;
+    bool is_str = (exit_qualification & (1ULL << 4)) != 0;
+
+    /*REP prefix : repets ECX times */
+    bool is_rep = (exit_qualification & (1ULL << 5)) != 0;
+
+
+    uint16_t port = (uint16_t)((exit_qualification >> 16) & 0xFFFFULL);
+    uint32_t io_val = 0;
+
+    PDEBUG("RELM: [VPID=%u] IO_EXIT: %s%s%s port=0x%03x size=%u "
+           "RIP=0x%llx",
+           vcpu->vpid,
+           is_in  ? "IN"     : "OUT",
+           is_str ? " STRING" : "",
+           is_rep ? " REP"    : "",
+           port, size, guest_rip);
+
+    /* Only the QEMU fw_cfg ports (0x510 selector / 0x511 data,
+     * used by SeaBIOS to fetch boot configuration) are emulated,
+     * and only their simple non-string non-REP forms — which is
+     * all SeaBIOS uses. */
+    if((port == FW_CFG_PORT_SEL || port == FW_CFG_PORT_DATA)
+        && !is_str
+        && !is_rep)
+    {
+        struct relm_vm *vm = vcpu->vm;
+
+        /*for OUT (guest writing to fw_cfg)*/
+        if(!is_in)
+        {
+            uint32_t size_mask = (size == 1) ? 0xFFU
+                : (size == 2) ? 0xFFFFU
+                : 0xFFFFFFFFU;
+
+            io_val = (uint32_t)(vcpu->arch.regs.rax & size_mask);
+            PDEBUG("RELM: fw_cfg OUT port=0x%03x val=0x%08x (size=%u)",
+                   port, io_val, size);
+        }
+
+        ret = relm_fw_cfg_handle_io(&vm->fw_data->fw_cfg, port, !is_in, size, &io_val);
+
+        /*guest is reading from fw_cfg*/
+        if(is_in)
+        {
+            /* Zero-extend io_val to 64 bits and deliver it to the
+             * guest RAX via vcpu->arch.regs (synced back to the
+             * on-stack GPR block by handle_vmexit). RAX is NOT a
+             * VMCS field: the old code wrote it to encoding 0x6818
+             * — GUEST_IDTR_BASE — corrupting the guest IDT base. */
+            unsigned long rax_val = (unsigned long)(io_val & 0xFFFFFFFFUL);
+            vcpu->arch.regs.rax = rax_val;
+
+            PDEBUG("RELM: fw_cfg IN  port=0x%03x → val=0x%08x "
+                       "(size=%u) → RAX=0x%lx",
+                       port, io_val, size, rax_val);
+        }
+
+        instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+        _vmwrite(GUEST_RIP, guest_rip + instr_len);
+        return ret;
+    }
+
+    PDEBUG("RELM: [VPID=%u] unhandled port 0x%03x %s size=%u — NOP",
+           vcpu->vpid, port, is_in ? "IN" : "OUT", size);
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+    return 1;
+}
+
+static int handle_vmcall(struct vcpu *vcpu, uint64_t guest_rip,
+                         uint64_t exit_qualification)
+{
+    uint64_t instr_len;
+
+    /* VMCALL always exits. Two users share it: the diagnostic
+     * IDT stubs we plant in the guest (each exception vector's
+     * stub does VMCALL with the vector in RAX, so early-boot
+     * faults reach the host log even with no working guest
+     * console), and — eventually — real hypercalls. */
+    pr_info("relm: [VPID=%u] VMCALL hypercall at RIP=0x%llx\n",
+            vcpu->vpid, guest_rip);
+
+
+    /*diagnostic IDT trampoline
+     * to distinguish a real hypercall from a diagnostic trap,
+     * we additionally check that guest_rip lands inside the
+     * stubs page and that rax is less that 256*/
+
+    uint64_t rax = vcpu->arch.regs.rax;
+    uint64_t stubs_lo = RELM_GUEST_IDT_STUBS_GPA;
+    uint64_t stubs_hi = stubs_lo + RELM_GUEST_IDT_STUBS_SIZE;
+
+    bool from_diag_stub = (guest_rip >= stubs_lo) &&
+        (guest_rip < stubs_hi) &&
+        (rax < 256ULL);
+
+    if(from_diag_stub)
+    {
+        uint64_t cr2 = _read_cr2();
+        uint64_t exit_qual = exit_qualification;
+
+        uint64_t stub_base = guest_rip - 8ULL;
+        uint64_t expected_stub = stubs_lo + rax *
+            RELM_GUEST_IDT_STUBS_STRIDE;
+
+        const char *vec_name = "unknown";
+        switch(rax)
+        {
+            case 0:  vec_name = "#DE (divide error)";          break;
+            case 1:  vec_name = "#DB (debug)";                 break;
+            case 2:  vec_name = "NMI";                         break;
+            case 3:  vec_name = "#BP (breakpoint)";            break;
+            case 4:  vec_name = "#OF (overflow)";              break;
+            case 5:  vec_name = "#BR (bound range)";           break;
+            case 6:  vec_name = "#UD (invalid opcode)";        break;
+            case 7:  vec_name = "#NM (no FPU)";                break;
+            case 8:  vec_name = "#DF (double fault)";          break;
+            case 10: vec_name = "#TS (invalid TSS)";           break;
+            case 11: vec_name = "#NP (segment not present)";   break;
+            case 12: vec_name = "#SS (stack-segment fault)";   break;
+            case 13: vec_name = "#GP (general protection)";    break;
+            case 14: vec_name = "#PF (page fault)";            break;
+            case 16: vec_name = "#MF (x87 FPE)";               break;
+            case 17: vec_name = "#AC (alignment check)";       break;
+            case 18: vec_name = "#MC (machine check)";         break;
+            case 19: vec_name = "#XM (SIMD FPE)";              break;
+            case 21: vec_name = "#CP (control protection)";    break;
+            default: break;
+        }
+
+        pr_err("RELM: [VPID=%u] *** DIAG-IDT TRAP vector=%llu (%s)\n",
+               vcpu->vpid, rax, vec_name);
+        pr_err("RELM:        RIP-at-vmcall=0x%llx  (stub_base=0x%llx, "
+               "expected=0x%llx%s)\n",
+               guest_rip - 3ULL, stub_base, expected_stub,
+               (stub_base == expected_stub) ? "" :
+                                              " — MISMATCH!");
+        pr_err("RELM:        CR2=0x%llx  (meaningful only for #PF)\n",
+               cr2);
+        pr_err("RELM:        EXIT_QUAL=0x%llx  RSP=0x%llx  RFLAGS=0x%llx\n",
+               exit_qual,
+               (uint64_t)__vmread(GUEST_RSP),
+               (uint64_t)__vmread(GUEST_RFLAGS));
+
+        /*stop guest */
+        return 0;
+    }
+    /*TODO :
+     * Non-diagnostic VMCALL: real hypercall path. */
+    pr_info("relm: [VPID=%u] VMCALL hypercall at RIP=0x%llx RAX=0x%llx\n",
+            vcpu->vpid, guest_rip, rax);
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+    return 1;
+}
+
+static int handle_msr_read(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    uint64_t instr_len;
+
+    uint32_t msr = vcpu->arch.regs.rcx & 0xFFFFFFFF;
+    pr_info("relm: [VPID=%u] RDMSR 0x%x at RIP=0x%llx\n",
+            vcpu->vpid, msr, guest_rip);
+
+    if (msr == MSR_IA32_APIC_BASE) {
+        /*
+         * Always report a fixed xAPIC-mode value — EXTD=0 (never
+         * x2apic), EN=1, base=0xfee00000, BSP=1 (only vCPU that
+         * ever reaches this path today). Never the real host's
+         * MSR value: passing that through leaks whatever
+         * x2apic/base state the REAL host CPU has (this box is
+         * itself nested under a real hypervisor), which desyncs
+         * the guest's x2apic_mode flag from its actual APIC
+         * driver table and crashes it in native_apic_mem_read —
+         * see docs/apic_bug.md for the full chain. RELM's own
+         * virtual-APIC infra (TPR shadow, CR8 handler, the
+         * EPT-backed 0xfee00000 page) is xAPIC-shaped, so this is
+         * also the only value consistent with what RELM actually
+         * emulates.
+         */
+        uint64_t val = 0xfee00000ULL |
+                       (1ULL << 11) | /* EN  */
+                       (1ULL << 8);   /* BSP */
+
+        vcpu->arch.regs.rax = (uint32_t)val;
+        vcpu->arch.regs.rdx = (uint32_t)(val >> 32);
+    } else {
+        /*TODO: emulate MSR_READ
+         * pass 0 for now*/
+        vcpu->arch.regs.rax = 0;
+        vcpu->arch.regs.rdx = 0;
+    }
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+    return 1;
+}
+
+static int handle_msr_write(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    uint64_t instr_len;
+
+    /* WRMSR: index in ECX, 64-bit value assembled from EDX:EAX.
+     * Only IA32_EFER is genuinely emulated (it gates the switch
+     * into 64-bit long mode); everything else is logged and
+     * dropped. */
+    uint32_t msr = vcpu->arch.regs.rcx & 0xFFFFFFFFULL;
+    uint64_t val = ((uint64_t)vcpu->arch.regs.rdx << 32) |
+            (uint64_t)(vcpu->arch.regs.rax & 0xFFFFFFFF);
+
+    PDEBUG("relm: [VPID=%u] WRMSR 0x%x = 0x%llx at RIP=0x%llx\n",
+            vcpu->vpid, msr, val, guest_rip);
+
+
+    /*handle IA32_EFER MSR index 0xC0000080*/
+    if(msr == MSR_IA32_EFER)
+    {
+        /*sanitize bit mask. clear reserved bits and
+         * only allow gust writes for valid bits
+         * SCE, LME, LMA, NXE*/
+        const uint64_t EFER_VALID_MASK = (1ULL << 0)  |  /* SCE */
+                                          (1ULL << 8)  |  /* LME */
+                                          (1ULL << 10) |  /* LMA */
+                                          (1ULL << 11);   /* NXE */
+        val &= EFER_VALID_MASK;
+
+        /*guest must not directly set the LMA bit, it
+         * is set by the CPU whem LME+PG is activated.
+         * so we clear it*/
+        val &= ~(1ULL << 10);
+
+        /*LMA = LME AND CR0.PG*/
+        uint64_t guest_cr0 = __vmread(GUEST_CR0);
+        bool lme = (val & (1ULL << 8)) != 0;
+        bool pg = (guest_cr0 & (1ULL << 31)) != 0;   /* CR0.PG is bit 31, not 32 */
+        bool lma = lme && pg;                        /* was `lma && pg` — used itself uninitialized */
+
+        if(lma)
+            val |= (1ULL << 10);                     /* was `val != (1ULL<<10)` — a discarded comparison; set LMA */
+
+        _vmwrite(GUEST_IA32_EFER, val);
+        vcpu->arch.efer = val;
+
+
+        PDEBUG("RELM: [VPID=%u] WRMSR EFER: LME=%u PG=%u → "
+                "LMA=%u EFER=0x%llx",
+                vcpu->vpid, lme ? 1:0, pg ? 1:0, lma ? 1:0, val);
+
+        /*sync IA32_MODE_GUEST in vm-entry controls
+         * we update it now, so the very next VMRESUME is in 64 bit long mode.*/
+        uint32_t entry_ctrl = (uint32_t)__vmread(VMCS_ENTRY_CONTROLS);
+        if(lma)
+        {
+            /*long mode active: set IA32_MODE_GUEST*/
+            entry_ctrl |= VM_ENTRY_IA32E_MODE;
+            PDEBUG("RELM: [VPID=%u] IA32E_MODE_GUEST → 1 "
+                    "(guest entered 64-bit long mode)", vcpu->vpid);
+        }else{
+            /*long mode not active : clear IA32E_MODE_GUEST*/
+            entry_ctrl &= ~(uint32_t)VM_ENTRY_IA32E_MODE;
+        }
+        _vmwrite(VMCS_ENTRY_CONTROLS, entry_ctrl);
+    }
+    else{
+
+        /*TODO
+         * Emulate Other MSRs writes
+         *  add cases for:
+         *  MSR_STAR / MSR_LSTAR / MSR_CSTAR: SYSCALL targets
+         *  MSR_FS_BASE / MSR_GS_BASE: segment bases
+         *  MSR_IA32_APIC_BASE: APIC relocation */
+
+    PDEBUG("RELM: [VPID=%u] WRMSR MSR=0x%08x ignored "
+               "(not emulated)", vcpu->vpid, msr);
+    }
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+
+    return 1;
+}
+
+static int handle_ept_violation(struct vcpu *vcpu, uint64_t guest_rip,
+                                uint64_t exit_qualification)
+{
+    uint64_t gpa = __vmread(GUEST_PHYSICAL_ADDRESS);
+    bool data_read = exit_qualification & (1ULL << 0);
+    bool data_write = exit_qualification & (1ULL << 1);
+    bool instr_fetch = exit_qualification & (1ULL << 2);
+    bool ept_readable = exit_qualification & (1ULL << 3);
+    bool ept_writable = exit_qualification & (1ULL << 4);
+    bool ept_executable = exit_qualification & (1ULL << 5);
+
+    bool was_present = ept_readable || ept_writable || ept_executable;
+
+    /* Unmapped GPA inside a reserved MMIO window = virtio device
+     * access (MMIO regions are trap-by-absence: reserved in the
+     * registry, never mapped in EPT — see virtio/mmio.c). */
+    if (!was_present)
+    {
+        if (relm_vm_gpa_is_mmio_region(vcpu->vm, gpa)) {
+
+            if (relm_virtio_mmio_handle_ept_violation(vcpu, gpa)) {
+                return 1;
+            }
+
+            pr_err("relm: [VPID=%u] unemulatable MMIO access at GPA "
+                   "0x%llx in a reserved MMIO range\n",
+                   vcpu->vpid, gpa);
+            vcpu->state = VCPU_STATE_ERROR;
+            return 0;
+        }
+    }
+
+    pr_err("relm: [VPID=%u] EPT violation at GPA 0x%llx\n",
+           vcpu->vpid, gpa);
+    pr_err(" Access: %s%s%s at RIP=0x%llx\n",
+           data_read ? "R" : "",
+           data_write ? "W" : "",
+           instr_fetch ? "X" : "",
+           guest_rip);
+    pr_err(" EPT entry: %s%s%s\n",
+           ept_readable ? "R" : "-",
+           ept_writable ? "W" : "-",
+          ept_executable ? "X" : "-");
+    vcpu->state = VCPU_STATE_STOPPED;
+    return 0;
+}
+
+static int handle_invalid_guest_state(struct vcpu *vcpu, uint64_t guest_rip,
+                                      uint64_t guest_rsp)
+{
+    pr_err("relm: [VPID=%u] Invalid guest state\n", vcpu->vpid);
+    pr_err(" Guest RIP: 0x%llx\n", guest_rip);
+    pr_err(" Guest RSP: 0x%llx\n", guest_rsp);
+
+    relm_dump_vcpu(vcpu);
+
+    vcpu->state = VCPU_STATE_STOPPED;
+    return 0;
+}
+
+static int handle_preemption_timer_expired(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    pr_warn("relm: [VPID=%u] Unexpected VMX preemption timer expired "
+            "at RIP=0x%llx — timer was not configured\n",
+            vcpu->vpid, guest_rip);
+
+    vcpu->state = VCPU_STATE_STOPPED;
+    return 0;
+}
+
+static int handle_ept_misconfig(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    uint64_t gpa = __vmread(GUEST_PHYSICAL_ADDRESS);
+
+    pr_err("relm: [VPID=%u] EPT misconfiguration at GPA 0x%llx RIP=0x%llx\n",
+           vcpu->vpid, gpa, guest_rip);
+    relm_vcpu_handle_ept_misconfig(vcpu->vm);
+    vcpu->state = VCPU_STATE_ERROR;
+    return 0;
+}
+
+static int handle_xsetbv(struct vcpu *vcpu, uint64_t guest_rip)
+{
+    uint64_t instr_len;
+    uint32_t xcr = (uint32_t)vcpu->arch.regs.rcx;
+    uint64_t val = ((uint64_t)(uint32_t)vcpu->arch.regs.rdx << 32) |
+                   (uint32_t)vcpu->arch.regs.rax;
+
+    if (xcr != 0) {
+        pr_err("relm: [VPID=%u] XSETBV xcr=%u val=0x%llx — unsupported\n",
+               vcpu->vpid, xcr, val);
+        vcpu->state = VCPU_STATE_STOPPED;
+        return 0;
+    }
+
+    /* XCR0 bit 0 (x87) must always stay set*/  
+    if ((val & 1) == 0) {
+        pr_err("relm: [VPID=%u] XSETBV XCR0 clears x87: 0x%llx\n",
+               vcpu->vpid, val);
+        vcpu->state = VCPU_STATE_STOPPED;
+        return 0;
+    }
+
+    vcpu->arch.xcr0 = val;
+
+    instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
+    _vmwrite(GUEST_RIP, guest_rip + instr_len);
+    return 1;
+}
+
 /*
  * handle_vmexit() — the C half of VM-exit handling, called by
  * relm_vmexit_handler (vmx_asm.S) with a pointer to the guest GPRs the
@@ -255,6 +747,7 @@ void relm_arch_dump_page_fault_regs(struct vcpu *vcpu)
  *        the loop can sleep until an interrupt is injected; fatal paths
  *        additionally set vcpu->state to STOPPED/ERROR before returning 0.
  */
+
 int handle_vmexit(struct stack_guest_gprs *guest_gprs)
 {
     struct vcpu *vcpu;
@@ -262,8 +755,7 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
     uint64_t exit_qualification;
     uint64_t guest_rip;
     uint64_t guest_rsp;
-    uint64_t instr_len;
-    u64 start_time, end_time, duration; 
+    u64 start_time, end_time, duration;
 
     int ret; 
 
@@ -287,9 +779,9 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
     {
         pr_err("relm: [VPID=%u] VM-entry failure in exit handler (reason=0x%llx)\n",
                vcpu->vpid, exit_reason & 0xFFFF);
-        relm_dump_vcpu(vcpu); 
-       
-        vcpu->state == VCPU_STATE_STOPPED; 
+        relm_dump_vcpu(vcpu);
+
+        vcpu->state = VCPU_STATE_STOPPED;
         return 0;
     }
     
@@ -338,533 +830,88 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
     PDEBUG("relm: [VPID=%u] Exit #%llu: reason=%llu RIP=0x%llx\n",
            vcpu->vpid, vcpu->stats.total_exits, exit_reason, guest_rip);
 
+    /*
+     * Debug-mode-only: disassemble and printk() the guest instruction at
+     * the RIP this exit landed on. Gated by RELM_INSN_DUMP_DEBUG
+     * (insn_dump.h) — expands to a full guest-page-walk + Zydis decode
+     * per exit when the flag is 1, to a zero-cost no-op when it's 0.
+     * Placed here (every exit, before the reason-specific switch below)
+     * so a triple-fault or other unexplained-exit investigation gets a
+     * full "what was the guest actually executing" trace across ALL
+     * exits leading up to the failure, not just the terminal one — see
+     * docs/insn_dump.md for the full rationale.
+     */
     RELM_DUMP_GUEST_INSN(vcpu, guest_rip);
 
     switch(exit_reason)
     {
         case EXIT_REASON_EXCEPTION_NMI:
-        {
-            uint32_t intr_info = __vmread(VM_EXIT_INTR_INFO);
-            uint32_t vector = intr_info & 0xFF;
-            uint32_t intr_type = (intr_info >> 8) & 0x7;
-            bool valid = !!(intr_info & (1U << 31)); 
-
-            //run host NMI handler 
-            if(valid && intr_type == 2 && vector == 2){
-                asm volatile("int $2");
-                ret = 1;
-                break;
-            }
-
-            pr_err("relm: [VPID=%u] Guest exception: vector=%u type=%u at RIP=0x%llx\n",
-                   vcpu->vpid, vector, intr_type, guest_rip);
-
-            if(vector == 14 && (intr_info & (1u << 11)))
-                relm_dump_page_fault(vcpu, guest_rip);
-
-
-            /*treat all exceptions as fatal */
-            vcpu->state = VCPU_STATE_STOPPED;
-            ret = 0;
-            break; 
-        }
+            ret = handle_exception_nmi(vcpu, guest_rip);
+            break;
 
         case EXIT_REASON_EXTERNAL_INTERRUPT:
-
-            /* external interrupt arrived ehile guest was running
-            * just re-enter the guest */
-            PDEBUG("relm: [VPID=%u] External interrupt\n", vcpu->vpid);
-            ret = 1;
-            break; 
+            ret = handle_external_interrupt(vcpu);
+            break;
 
         case EXIT_REASON_TRIPLE_FAULT:
-
-            /* Guest took a fault while delivering a double fault — on
-             * bare metal the machine would reset. Unrecoverable; stop. */
-            pr_err("relm: [VPID=%u] Guest triple fault at RIP=0x%llx\n",
-                   vcpu->vpid, guest_rip);
-            relm_dump_fault_regs(vcpu, guest_rsp);
-            vcpu->state = VCPU_STATE_STOPPED;
-            ret = 0;
-            break; 
+            ret = handle_triple_fault(vcpu, guest_rip, guest_rsp);
+            break;
 
         case EXIT_REASON_APIC_ACCESS:
-            /* Guest touched the APIC page at 0xFEE00000. Full fetch/
-             * decode/emulate flow lives in vmx/apic.c; it also advances
-             * the guest RIP itself. */
-            ret = relm_apic_handle_access(vcpu);
+            ret = handle_apic_access(vcpu);
             break;
 
         case EXIT_REASON_INIT_SIGNAL:
-
-            /* INIT arriving at a running vCPU. Proper handling would put
-             * it in wait-for-SIPI (the SMP bring-up dance in apic.c's IPI
-             * TODOs); until then treat as a stop request. */
-            pr_info("relm: [VPID=%u] INIT signal received\n", vcpu->vpid);
-            vcpu->state = VCPU_STATE_STOPPED;
-            ret = 0; 
-            break; 
+            ret = handle_init_signal(vcpu);
+            break;
 
         case EXIT_REASON_HLT:
-
-            PDEBUG("relm: [VPID=%u] Guest executed HLT at RIP=0x%llx\n",
-                    vcpu->vpid, guest_rip);
-
-            /*
-             * HLT is the guest idle path: it expects to resume at the next
-             * instruction once an interrupt is delivered. We advance RIP past
-             * the HLT and mark the vCPU halted, but KEEP state == RUNNING and
-             * return 0 so control unwinds to relm_vcpu_loop, which then sleeps
-             * on the wait queue until an interrupt is injected (or the vCPU is
-             * stopped) and re-enters the guest.
-             *
-             * The old code set state = VCPU_STATE_HALTED, which the generic loop
-             * treats as "state != RUNNING" and breaks out of — permanently
-             * stopping the vCPU on the very first HLT and halting boot progress.
-             */
-            vcpu->halted = true;
-
-            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-            _vmwrite(GUEST_RIP, guest_rip + instr_len);
-
-            ret = 0;   /* return to relm_vcpu_loop, which sleeps until woken */
+            ret = handle_hlt(vcpu, guest_rip);
             break;
 
         case EXIT_REASON_CPUID:
-        {
-            /* Fill RAX/RBX/RCX/RDX in vcpu->arch.regs (synced to the
-             * stack block at the bottom), then step past the 2-byte
-             * CPUID using the hardware-reported instruction length. */
-            emulate_cpuid(vcpu);
-            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-            _vmwrite(GUEST_RIP, guest_rip + instr_len);
-            ret = 1;
+            ret = handle_cpuid(vcpu, guest_rip);
             break;
-        }
-
 
         case EXIT_REASON_IO_INSTRUCTION:
-        {
-            /* IN/OUT trapped via the I/O bitmaps. The exit qualification
-             * (SDM Vol 3C table 27-5) tells us everything — no decoding
-             * needed: bits 2:0 = access size minus one, bit 3 =
-             * direction (1 = IN), bit 4 = string op (INS/OUTS), bit 5 =
-             * REP prefix, bits 31:16 = port number. */
-            uint32_t size = (uint32_t)(exit_qualification & 0x7ULL) + 1;
-            bool is_in = (exit_qualification & (1ULL << 3)) != 0;
-            bool is_str = (exit_qualification & (1ULL << 4)) != 0;
-
-            /*REP prefix : repets ECX times */
-            bool is_rep = (exit_qualification & (1ULL << 5)) != 0;
-
-
-            uint16_t port = (uint16_t)((exit_qualification >> 16) & 0xFFFFULL); 
-            uint32_t io_val = 0; 
-
-            PDEBUG("RELM: [VPID=%u] IO_EXIT: %s%s%s port=0x%03x size=%u "
-                   "RIP=0x%llx",
-                   vcpu->vpid,
-                   is_in  ? "IN"     : "OUT",
-                   is_str ? " STRING" : "",
-                   is_rep ? " REP"    : "",
-                   port, size, guest_rip);
-
-            /* Only the QEMU fw_cfg ports (0x510 selector / 0x511 data,
-             * used by SeaBIOS to fetch boot configuration) are emulated,
-             * and only their simple non-string non-REP forms — which is
-             * all SeaBIOS uses. */
-            if((port == FW_CFG_PORT_SEL || port == FW_CFG_PORT_DATA)
-                && !is_str
-                && !is_rep)
-            {
-                struct relm_vm *vm = vcpu->vm; 
-
-                /*for OUT (guest writing to fw_cfg)*/ 
-                if(!is_in)
-                {
-                    uint32_t size_mask = (size == 1) ? 0xFFU 
-                        : (size == 2) ? 0xFFFFU 
-                        : 0xFFFFFFFFU; 
-                        
-                    io_val = (uint32_t)(vcpu->arch.regs.rax & size_mask); 
-                    PDEBUG("RELM: fw_cfg OUT port=0x%03x val=0x%08x (size=%u)",
-                           port, io_val, size);
-                }
-
-                ret = relm_fw_cfg_handle_io(&vm->fw_data->fw_cfg, port, !is_in, size, &io_val);
-
-                /*guest is reading from fw_cfg*/
-                if(is_in)
-                {
-                    /* Zero-extend io_val to 64 bits and deliver it to the
-                     * guest RAX via vcpu->arch.regs (synced back to the
-                     * on-stack GPR block by handle_vmexit). RAX is NOT a
-                     * VMCS field: the old code wrote it to encoding 0x6818
-                     * — GUEST_IDTR_BASE — corrupting the guest IDT base. */
-                    unsigned long rax_val = (unsigned long)(io_val & 0xFFFFFFFFUL);
-                    vcpu->arch.regs.rax = rax_val;
-
-                    PDEBUG("RELM: fw_cfg IN  port=0x%03x → val=0x%08x "
-                               "(size=%u) → RAX=0x%lx",
-                               port, io_val, size, rax_val);
-                }
-
-                instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-                _vmwrite(GUEST_RIP, guest_rip + instr_len);
-                break; 
-            }
-
-            /* Any other port: NOP the access. OUTs are swallowed; INs
-             * leave RAX untouched. The guest keeps running — legacy
-             * device probes (PIC, PIT, serial...) just see nothing. */
-            PDEBUG("RELM: [VPID=%u] unhandled port 0x%03x %s size=%u — NOP",
-                   vcpu->vpid, port, is_in ? "IN" : "OUT", size);
-
-            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-            _vmwrite(GUEST_RIP, guest_rip + instr_len);
-            ret = 1;
+            ret = handle_io_instruction(vcpu, guest_rip, exit_qualification);
             break;
-        }
 
         case EXIT_REASON_VMCALL:
-
-            /* VMCALL always exits. Two users share it: the diagnostic
-             * IDT stubs we plant in the guest (each exception vector's
-             * stub does VMCALL with the vector in RAX, so early-boot
-             * faults reach the host log even with no working guest
-             * console), and — eventually — real hypercalls. */
-            pr_info("relm: [VPID=%u] VMCALL hypercall at RIP=0x%llx\n",
-                    vcpu->vpid, guest_rip);
-
-
-            /*diagnostic IDT trampoline 
-             * to distinguish a real hypercall from a diagnostic trap, 
-             * we additionally check that guest_rip lands inside the 
-             * stubs page and that rax is less that 256*/ 
-
-            uint64_t rax = vcpu->arch.regs.rax; 
-            uint64_t stubs_lo = RELM_GUEST_IDT_STUBS_GPA; 
-            uint64_t stubs_hi = stubs_lo + RELM_GUEST_IDT_STUBS_SIZE; 
-
-            bool from_diag_stub = (guest_rip >= stubs_lo) && 
-                (guest_rip < stubs_hi) && 
-                (rax < 256ULL); 
-            
-            if(from_diag_stub)
-            {
-                uint64_t cr2 = _read_cr2(); 
-                uint64_t exit_qual = exit_qualification; 
-
-                uint64_t stub_base = guest_rip - 8ULL; 
-                uint64_t expected_stub = stubs_lo + rax *
-                    RELM_GUEST_IDT_STUBS_STRIDE; 
-
-                const char *vec_name = "unknown"; 
-                switch(rax)
-                {
-                    case 0:  vec_name = "#DE (divide error)";          break;
-                    case 1:  vec_name = "#DB (debug)";                 break;
-                    case 2:  vec_name = "NMI";                         break;
-                    case 3:  vec_name = "#BP (breakpoint)";            break;
-                    case 4:  vec_name = "#OF (overflow)";              break;
-                    case 5:  vec_name = "#BR (bound range)";           break;
-                    case 6:  vec_name = "#UD (invalid opcode)";        break;
-                    case 7:  vec_name = "#NM (no FPU)";                break;
-                    case 8:  vec_name = "#DF (double fault)";          break;
-                    case 10: vec_name = "#TS (invalid TSS)";           break;
-                    case 11: vec_name = "#NP (segment not present)";   break;
-                    case 12: vec_name = "#SS (stack-segment fault)";   break;
-                    case 13: vec_name = "#GP (general protection)";    break;
-                    case 14: vec_name = "#PF (page fault)";            break;
-                    case 16: vec_name = "#MF (x87 FPE)";               break;
-                    case 17: vec_name = "#AC (alignment check)";       break;
-                    case 18: vec_name = "#MC (machine check)";         break;
-                    case 19: vec_name = "#XM (SIMD FPE)";              break;
-                    case 21: vec_name = "#CP (control protection)";    break;
-                    default: break;
-                }
-
-                pr_err("RELM: [VPID=%u] *** DIAG-IDT TRAP vector=%llu (%s)\n",
-                       vcpu->vpid, rax, vec_name);
-                pr_err("RELM:        RIP-at-vmcall=0x%llx  (stub_base=0x%llx, "
-                       "expected=0x%llx%s)\n",
-                       guest_rip - 3ULL, stub_base, expected_stub,
-                       (stub_base == expected_stub) ? "" :
-                                                      " — MISMATCH!");
-                pr_err("RELM:        CR2=0x%llx  (meaningful only for #PF)\n",
-                       cr2);
-                pr_err("RELM:        EXIT_QUAL=0x%llx  RSP=0x%llx  RFLAGS=0x%llx\n",
-                       exit_qual,
-                       (uint64_t)__vmread(GUEST_RSP),
-                       (uint64_t)__vmread(GUEST_RFLAGS)); 
-
-                /*stop guest */ 
-               ret = 0; 
-                break; 
-            }
-            /*TODO : 
-             * Non-diagnostic VMCALL: real hypercall path. */
-            pr_info("relm: [VPID=%u] VMCALL hypercall at RIP=0x%llx RAX=0x%llx\n",
-                    vcpu->vpid, guest_rip, rax);
-
-            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-            _vmwrite(GUEST_RIP, guest_rip + instr_len);
-            ret = 1;
+            ret = handle_vmcall(vcpu, guest_rip, exit_qualification);
             break;
 
         case EXIT_REASON_MSR_READ:
-        {
-            /* RDMSR trapped by the MSR bitmap. ECX holds the MSR index;
-             * the result is returned split across EDX:EAX. */
-            uint32_t msr = vcpu->arch.regs.rcx & 0xFFFFFFFF;
-
-            if(msr == MSR_IA32_APIC_BASE){
-                uint64_t val = 0xfee00000ULL | 
-                        (1ULL << 11) | 
-                        (1ULL << 8); 
-                vcpu->arch.regs.rax = (uint32_t)val;
-                vcpu->arch.regs.rdx = (uint32_t)(val >> 32); 
-            }else{
-                vcpu->arch.regs.rax = 0;
-                vcpu->arch.regs.rdx = 0;
-            }
-            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-            _vmwrite(GUEST_RIP, guest_rip + instr_len);
-            ret = 1;
-            break; 
-
-        }
+            ret = handle_msr_read(vcpu, guest_rip);
+            break;
 
         case EXIT_REASON_MSR_WRITE:
-        {
-            /* WRMSR: index in ECX, 64-bit value assembled from EDX:EAX.
-             * Only IA32_EFER is genuinely emulated (it gates the switch
-             * into 64-bit long mode); everything else is logged and
-             * dropped. */
-            uint32_t msr = vcpu->arch.regs.rcx & 0xFFFFFFFFULL;
-            uint64_t val = ((uint64_t)vcpu->arch.regs.rdx << 32) |
-                    (uint64_t)(vcpu->arch.regs.rax & 0xFFFFFFFF);
-
-            PDEBUG("relm: [VPID=%u] WRMSR 0x%x = 0x%llx at RIP=0x%llx\n",
-                    vcpu->vpid, msr, val, guest_rip);
-
-
-            /*handle IA32_EFER MSR index 0xC0000080*/ 
-            if(msr == MSR_IA32_EFER)
-            {
-                /*sanitize bit mask. clear reserved bits and 
-                 * only allow gust writes for valid bits 
-                 * SCE, LME, LMA, NXE*/ 
-                const uint64_t EFER_VALID_MASK = (1ULL << 0)  |  /* SCE */
-                                                  (1ULL << 8)  |  /* LME */
-                                                  (1ULL << 10) |  /* LMA */
-                                                  (1ULL << 11);   /* NXE */
-                val &= EFER_VALID_MASK;
-
-                /*guest must not directly set the LMA bit, it 
-                 * is set by the CPU whem LME+PG is activated. 
-                 * so we clear it*/ 
-                val &= ~(1ULL << 10);
-
-                /*LMA = LME AND CR0.PG*/
-                uint64_t guest_cr0 = __vmread(GUEST_CR0);
-                bool lme = (val & (1ULL << 8)) != 0;
-                bool pg = (guest_cr0 & (1ULL << 31)) != 0;   /* CR0.PG is bit 31, not 32 */
-                bool lma = lme && pg;                        /* was `lma && pg` — used itself uninitialized */
-
-                if(lma)
-                    val |= (1ULL << 10);                     /* was `val != (1ULL<<10)` — a discarded comparison; set LMA */
-
-                _vmwrite(GUEST_IA32_EFER, val); 
-                vcpu->arch.efer = val;
-
-
-                PDEBUG("RELM: [VPID=%u] WRMSR EFER: LME=%u PG=%u → "
-                        "LMA=%u EFER=0x%llx",
-                        vcpu->vpid, lme ? 1:0, pg ? 1:0, lma ? 1:0, val);
-
-                /*sync IA32_MODE_GUEST in vm-entry controls 
-                 * we update it now, so the very next VMRESUME is in 64 bit long mode.*/
-                uint32_t entry_ctrl = (uint32_t)__vmread(VMCS_ENTRY_CONTROLS); 
-                if(lma)
-                {
-                    /*long mode active: set IA32_MODE_GUEST*/  
-                    entry_ctrl |= VM_ENTRY_IA32E_MODE;
-                    PDEBUG("RELM: [VPID=%u] IA32E_MODE_GUEST → 1 "
-                            "(guest entered 64-bit long mode)", vcpu->vpid);
-                }else{
-                    /*long mode not active : clear IA32E_MODE_GUEST*/ 
-                    entry_ctrl &= ~(uint32_t)VM_ENTRY_IA32E_MODE; 
-                }
-                _vmwrite(VMCS_ENTRY_CONTROLS, entry_ctrl); 
-            }
-            else{
-
-                /*TODO
-                 * Emulate Other MSRs writes 
-                 *  add cases for:
-                 *  MSR_STAR / MSR_LSTAR / MSR_CSTAR: SYSCALL targets
-                 *  MSR_FS_BASE / MSR_GS_BASE: segment bases
-                 *  MSR_IA32_APIC_BASE: APIC relocation */
-
-            PDEBUG("RELM: [VPID=%u] WRMSR MSR=0x%08x ignored "
-                       "(not emulated)", vcpu->vpid, msr);
-            }
-
-            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-            _vmwrite(GUEST_RIP, guest_rip + instr_len);
-
-            ret = 1;
-            break; 
-        }
-
+            ret = handle_msr_write(vcpu, guest_rip);
+            break;
 
         case EXIT_REASON_EPT_VIOLATION:
-        {
-            /* Guest access to a GPA the EPT tables reject. Qualification
-             * bits (SDM Vol 3C table 27-7): 2:0 = what the ACCESS was
-             * (read/write/fetch), 5:3 = what the EPT ENTRY allowed.
-             * Entry bits all clear = the GPA is not mapped at all — which
-             * is either our deliberate MMIO trap or a real guest bug. */
-            uint64_t gpa = __vmread(GUEST_PHYSICAL_ADDRESS);
-            bool data_read = exit_qualification & (1ULL << 0);
-            bool data_write = exit_qualification & (1ULL << 1);
-            bool instr_fetch = exit_qualification & (1ULL << 2);
-            bool ept_readable = exit_qualification & (1ULL << 3);
-            bool ept_writable = exit_qualification & (1ULL << 4);
-            bool ept_executable = exit_qualification & (1ULL << 5);
-
-            bool was_present = ept_readable || ept_writable || ept_executable;
-
-            /* Unmapped GPA inside a reserved MMIO window = virtio device
-             * access (MMIO regions are trap-by-absence: reserved in the
-             * registry, never mapped in EPT — see virtio/mmio.c). */
-            if (!was_present)
-            {
-            /*if GPA is in the range the VM has reserved for MMIO */
-                if (relm_vm_gpa_is_mmio_region(vcpu->vm, gpa)) {
-
-                    ret = relm_handle_cr_access_exit(vcpu, exit_qualification, guest_rip);
-            break; if (relm_virtio_mmio_handle_ept_violation(vcpu, gpa)) {
-                        /* MMIO access emulated (the handler advanced RIP past
-                         * the faulting instruction). Resume the guest via
-                         * VMRESUME. The old code returned 0 = stop, killing the
-                         * guest on its first virtio MMIO access. */
-                        ret = 1;
-                        break;
-                    }
-
-                    /* Reserved range, but the access could not be emulated:
-                     * either no registered device claimed the GPA (an
-                     * initialization-ordering bug) or the handler failed to
-                     * fetch/decode the faulting instruction (it logged the
-                     * specific cause). Resuming would just re-fault at the
-                     * same RIP forever, so stop the vCPU. */
-                    pr_err("relm: [VPID=%u] unemulatable MMIO access at GPA "
-                           "0x%llx in a reserved MMIO range\n",
-                           vcpu->vpid, gpa);
-                    vcpu->state = VCPU_STATE_ERROR;
-                    ret = 0;
-                    break;
-                }
-            }
-            /* Not an MMIO window: the guest touched memory it has no
-             * business touching (or our EPT setup is missing a mapping).
-             * Dump access-vs-permissions and stop. */
-            pr_err("relm: [VPID=%u] EPT violation at GPA 0x%llx\n",
-                   vcpu->vpid, gpa);
-            pr_err(" Access: %s%s%s at RIP=0x%llx\n",
-                   data_read ? "R" : "",
-                   data_write ? "W" : "",
-                   instr_fetch ? "X" : "",
-                   guest_rip);
-            pr_err(" EPT entry: %s%s%s\n",
-                   ept_readable ? "R" : "-",
-                   ept_writable ? "W" : "-",
-                  ept_executable ? "X" : "-");
-            vcpu->state = VCPU_STATE_STOPPED;
-            ret = 0;
+            ret = handle_ept_violation(vcpu, guest_rip, exit_qualification);
             break;
-        }
-        
+
         case EXIT_REASON_CR_ACCESS:
-        {
-            ret  = relm_handle_cr_access_exit(vcpu, exit_qualification, guest_rip);
-            break; 
-        }
+            ret = handle_cr_access(vcpu, exit_qualification, guest_rip);
+            break;
+
         case EXIT_REASON_INVALID_GUEST_STATE:
-
-            /* VM-entry itself failed */ 
-            pr_err("relm: [VPID=%u] Invalid guest state\n", vcpu->vpid);
-            pr_err(" Guest RIP: 0x%llx\n", guest_rip);
-            pr_err(" Guest RSP: 0x%llx\n", guest_rsp);
-
-            relm_dump_vcpu(vcpu);
-
-            vcpu->state = VCPU_STATE_STOPPED;
-            ret = 0;
-            break; 
+            ret = handle_invalid_guest_state(vcpu, guest_rip, guest_rsp);
+            break;
 
         case EXIT_REASON_VMX_PREEMPTION_TIMER_EXPIRED:
-       
-            pr_warn("relm: [VPID=%u] Unexpected VMX preemption timer expired "
-                    "at RIP=0x%llx — timer was not configured\n",
-                    vcpu->vpid, guest_rip);
-            
-            vcpu->state = VCPU_STATE_STOPPED;
-            ret = 0; 
-            break; 
-       
+            ret = handle_preemption_timer_expired(vcpu, guest_rip);
+            break;
+
         case EXIT_REASON_EPT_MISCONFIG:
-        {
-            uint64_t gpa = __vmread(GUEST_PHYSICAL_ADDRESS);
-
-            /* An EPT misconfiguration means an EPT paging-structure entry has
-             * an illegal configuration (e.g. a reserved bit set, or a bad
-             * memory type on a leaf). Previously this reason had no case and
-             * fell through to the generic "unhandled" path, hiding the cause.
-             * Dispatch to the dedicated diagnostic dumper, then stop. */
-            pr_err("relm: [VPID=%u] EPT misconfiguration at GPA 0x%llx RIP=0x%llx\n",
-                   vcpu->vpid, gpa, guest_rip);
-            relm_vcpu_handle_ept_misconfig(vcpu->vm);
-            vcpu->state = VCPU_STATE_ERROR;
-            ret = 0;
-            break;
-        }
-
-        case EXIT_REASON_XSETBV: 
-        {
-            uint32_t xcr = (uint32_t)vcpu->arch.regs.rcx; 
-            uint32_t val = ((uint64_t)(uint32_t)vcpu->arch.regs.rdx << 32) | 
-                            (uint32_t)vcpu->arch.regs.rax; 
-
-            /*guest must be CPL 0, if not we #GP*/ 
-            if (xcr != 0) {
-                /* Only XCR0 is architecturally defined for this path. */
-                pr_err("relm: [VPID=%u] XSETBV xcr=%u val=0x%llx — unsupported\n",
-                       vcpu->vpid, xcr, val);
-                vcpu->state = VCPU_STATE_STOPPED;
-                ret = 0;
-                break;
-            }
-
-            /* Bit 0 (x87) must stay 1*/  
-            if ((val & 1) == 0) {
-                pr_err("relm: [VPID=%u] XSETBV XCR0 clears x87: 0x%llx\n",
-                       vcpu->vpid, val);
-                vcpu->state = VCPU_STATE_STOPPED;
-                ret = 0;
-                break;
-            }
-
-            vcpu->arch.xcr0 = val;
-
-            instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
-            _vmwrite(GUEST_RIP, guest_rip + instr_len);
-            ret = 1;
+            ret = handle_ept_misconfig(vcpu, guest_rip);
             break;
 
-        }
+        case EXIT_REASON_XSETBV:
+            ret = handle_xsetbv(vcpu, guest_rip);
+            break;
 
         default:
 
@@ -874,15 +921,10 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             pr_err(" Exit qualification: 0x%llx\n", exit_qualification);
 
             vcpu->state = VCPU_STATE_STOPPED;
-            ret = 0; 
-            break;  
+            ret = 0;
+            break;
     }
 
-    /* Copy emulated register state back into the on-stack save block: it is
-     * what the VM-exit stub pops into the CPU before VMRESUME (see
-     * vmx_asm.S). Handlers write only vcpu->arch.regs; without this sync any
-     * emulated result (CPUID, IN, MMIO reads, ...) would be silently
-     * discarded and the guest would resume with stale registers. */
     guest_gprs->rax = vcpu->arch.regs.rax;
     guest_gprs->rbx = vcpu->arch.regs.rbx;
     guest_gprs->rcx = vcpu->arch.regs.rcx;
@@ -909,6 +951,7 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
                        duration);
     return ret;
 }
+
 
 /*
  * vmx_handle_exit — vcpu_arch_ops.handle_exit hook for the generic run loop.
