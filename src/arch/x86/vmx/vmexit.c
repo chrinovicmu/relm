@@ -341,13 +341,17 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
     {
         case EXIT_REASON_EXCEPTION_NMI:
         {
-            /* A guest exception whose vector is set in our exception
-             * bitmap (or an NMI). Interruption info encodes what fired:
-             * bits 7:0 = vector, bits 10:8 = type (3 = hardware
-             * exception, 2 = NMI, ...). */
             uint32_t intr_info = __vmread(VM_EXIT_INTR_INFO);
             uint32_t vector = intr_info & 0xFF;
             uint32_t intr_type = (intr_info >> 8) & 0x7;
+            bool valid = !!(intr_info & (1U << 31)); 
+
+            //run host NMI handler 
+            if(valid && intr_type == 2 && vector == 2){
+                asm volatile("int $2");
+                ret = 1;
+                break;
+            }
 
             pr_err("relm: [VPID=%u] Guest exception: vector=%u type=%u at RIP=0x%llx\n",
                    vcpu->vpid, vector, intr_type, guest_rip);
