@@ -853,28 +853,61 @@ static void relm_disable_ud_intercept(struct vcpu *vcpu)
     relm_clear_exception_intercept(vcpu, 16); 
 }
 
+static void relm_msr_bitmap_set(uint8_t *bitmap, uint32_t msr, unsigned access)
+{
+	uint32_t offset;
+	uint32_t byte;
+	uint8_t  bit;
 
-/*MSRs that cause VM exit when accessed by guest */ 
+	if (msr <= 0x1FFF)
+		offset = 0;
+	else if (msr >= 0xC0000000 && msr <= 0xC0001FFF)
+		offset = 0x400;
+	else
+		return; /* not represented in the hardware bitmap */
+
+	byte = offset + (msr & 0x1FFF) / 8;
+	bit  = (msr & 0x1FFF) % 8;
+
+	if (access & RELM_MSR_READ)
+		bitmap[byte] |= (1u << bit);
+	if (access & RELM_MSR_WRITE)
+		bitmap[byte + 0x800] |= (1u << bit);
+}
+
+static void relm_intercept_sysenter_cs(uint8_t *bitmap)
+{
+	/* VM-exit on RDMSR of IA32_SYSENTER_CS */
+	relm_msr_bitmap_set(bitmap, IA32_SYSENTER_CS, RELM_MSR_READ);
+}
+static void relm_intercept_apic_base(uint8_t *bitmap)
+{
+	relm_msr_bitmap_set(bitmap, MSR_IA32_APIC_BASE, RELM_MSR_READ);
+}
+
 static int relm_setup_msr_bitmap(struct vcpu *vcpu)
 {
-    vcpu->arch.msr_bitmap = (uint8_t *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
-    if(!vcpu->arch.msr_bitmap)
-    {
-        pr_info("Failed to allocate MSR bitmap\n"); 
-        return -ENOMEM;
-    }
+	uint8_t *bitmap;
 
-    vcpu->arch.msr_bitmap_pa = virt_to_phys(vcpu->arch.msr_bitmap); 
+	vcpu->arch.msr_bitmap = (uint8_t *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+	if (!vcpu->arch.msr_bitmap) {
+		pr_info("Failed to allocate MSR bitmap\n");
+		return -ENOMEM;
+	}
 
-    /*mark IA32_SYSENTER_CS as causing a VM exit */ 
-    uint32_t msr_index = IA32_SYSENTER_CS;
-    uint8_t *bitmap = (uint8_t*)vcpu->arch.msr_bitmap;
-    uint32_t byte = msr_index / 8;
-    uint8_t bit = msr_index % 8; 
-    bitmap[byte] |= (1 << bit); 
+	vcpu->arch.msr_bitmap_pa = virt_to_phys(vcpu->arch.msr_bitmap);
+	bitmap = vcpu->arch.msr_bitmap;
 
-    return 0; 
+	relm_intercept_sysenter_cs(bitmap);
+	relm_intercept_apic_base(bitmap);
+
+	/*
+	 * VMCS_MSR_BITMAP is written later in vmx_vcpu_init() after
+	 * VMPTRLD — no VMCS is current here.
+	 */
+	return 0;
 }
+
 
 /*util round size up to full pagess and computer order */ 
 static inline unsigned int msr_area_order(size_t bytes)

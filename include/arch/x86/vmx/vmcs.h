@@ -119,6 +119,8 @@
 #define MSR_IA32_GS_BASE    0xC0000101  
 #define IA32_SYSENTER_CS    0x00000174
 
+#define MSR_IA32_APIC_BASE  0x0000001B 
+
 /* Memory Management Constants */
 #define VMCS_IO_BITMAP_PAGE_SIZE    4096
 #define VMCS_IO_BITMAP_PAGES_ORDER  1 

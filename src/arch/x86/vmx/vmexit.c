@@ -610,14 +610,17 @@ int handle_vmexit(struct stack_guest_gprs *guest_gprs)
             /* RDMSR trapped by the MSR bitmap. ECX holds the MSR index;
              * the result is returned split across EDX:EAX. */
             uint32_t msr = vcpu->arch.regs.rcx & 0xFFFFFFFF;
-            pr_info("relm: [VPID=%u] RDMSR 0x%x at RIP=0x%llx\n",
-                    vcpu->vpid, msr, guest_rip);
 
-            /*TODO: emulate MSR_READ
-             * pass 0 for now*/
-            vcpu->arch.regs.rax = 0;
-            vcpu->arch.regs.rdx = 0;
-
+            if(msr == MSR_IA32_APIC_BASE){
+                uint64_t val = 0xfee00000ULL | 
+                        (1ULL << 11) | 
+                        (1ULL << 8); 
+                vcpu->arch.regs.rax = (uint32_t)val;
+                vcpu->arch.regs.rdx = (uint32_t)(val >> 32); 
+            }else{
+                vcpu->arch.regs.rax = 0;
+                vcpu->arch.regs.rdx = 0;
+            }
             instr_len = __vmread(VM_EXIT_INSTRUCTION_LEN);
             _vmwrite(GUEST_RIP, guest_rip + instr_len);
             ret = 1;

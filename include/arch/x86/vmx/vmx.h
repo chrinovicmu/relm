@@ -69,6 +69,13 @@ struct cr3_shadow_cache
     spinlock_t lock; 
 };
 
+enum relm_msr_access{
+    RELM_MSR_READ = 1 << 0, 
+    RELM_MSR_WRITE = 1 << 1, 
+    RELM_MSR_RW = RELM_MSR_READ | RELM_MSR_WRITE, 
+}; 
+
+
 struct relm_vm;  // forward declaration
 
 /*
