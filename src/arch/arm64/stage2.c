@@ -3,89 +3,20 @@
 #include <linux/gfp.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/io.h>
 
 #include <relm/vm.h>
 #include <relm/vcpu.h>
+#include <virtio/mmio.h>
 #include <stage2.h>
 
-
-struct relm_stage2_table {
-    s2_entry_t *entries;
-    phys_addr_t pa;
-    unsigned int level;
-    struct relm_stage2_table *next;
-};
-
-
-struct s2_walk {
-    s2_entry_t *entry;
-    u64 descriptor;
-    u64 base;
-    u64 size;
-    unsigned int level;
-};
-
-/*
- * A point-in-time copy of vm->memory.mmio_regions, taken under vm->lock
- * and then used WITHOUT that lock for the rest of a mapping operation.
- * This exists because s2_map() below needs to consult the MMIO list many
- * times while it may also sleep (table allocation is GFP_KERNEL, and
- * s2_begin_update()/s2_runtime.invalidate() are not guaranteed non-sleeping
- * either) — and vm->lock is a plain spinlock, so nothing that can sleep is
- * allowed to run while holding it. Snapshotting once up front avoids ever
- * needing to re-acquire that spinlock mid-mapping.
-*/ 
-struct s2_mmio_snapshot {
-    unsigned int count;
-    struct {
-        u64 start;
-        u64 end;
-    } region[RELM_MAX_MMIO_REGIONS];
-};
-
-/*
- * What kind of leaf s2_map()'s inner loop should try to install for each
- * stride of the requested range:
- *   S2_MAP_PAGES          — always 4 KiB leaves (relm_stage2_map_page/range).
- *   S2_MAP_BLOCK          — always one 2 MiB leaf; caller already validated
- *                           the whole request is exactly 2 MiB and aligned
- *                           (relm_stage2_map_huge_page).
- *   S2_MAP_PREFER_BLOCKS  — try a 2 MiB block per stride, falling back to
- *                           4 KiB leaves wherever alignment or an MMIO hole
- *                           doesn't allow one (relm_stage2_map_guest_ram_huge).
- */
-enum s2_map_mode {
-    S2_MAP_PAGES,
-    S2_MAP_BLOCK,
-    S2_MAP_PREFER_BLOCKS,
-};
-
-
-/*
- * Global (not per-VM) state. There is exactly one EL2 runtime for the
- * whole host, so the registration/limits/VMID-namespace below are process-
- * wide singletons, mirrored by the single s2_runtime_lock protecting all
- * of them.
- */
 static DEFINE_MUTEX(s2_runtime_lock);
-static struct relm_stage2_runtime_ops s2_runtime; /* Copy of the registered callback struct. */
-static struct relm_stage2_geometry s2_limits;     /* This host's maximum supported geometry. */
-static bool s2_runtime_ready;      /* True between a successful register and unregister. */
-static unsigned int s2_contexts;   /* Live context count; pins the runtime, blocks unregister. */
-static u64 s2_generation;          /* Bumped on (re)registration; a context's VMID is only valid for the generation it was allocated under. */
-
-/*
- * One bit per possible VMID value, 0..65535, covering both the 8-bit and
- * 16-bit VMID spaces at once (an 8-bit-VMID context only ever allocates
- * from 0..255, but the bitmap doesn't need to know that — s2_alloc_vmid()
- * is simply told how many bits wide to search). Bit 0 (VMID 0) is pre-set
- * so it is never handed out: VMID 0 is conventionally reserved, not a real
- * VM's translation tag.
- */
-static u64 s2_vmids[65536U / 64U];
+static struct relm_stage2_runtime_ops s2_runtime;
+static struct relm_stage2_geometry s2_limits;
+static bool s2_runtime_ready;
 
 static int s2_pa_encoding(unsigned int bits)
 {
@@ -109,7 +40,9 @@ static bool s2_geometry_valid(const struct relm_stage2_geometry *geometry)
            (geometry->vmid_bits == 8 || geometry->vmid_bits == 16);
 }
 
-
+/* Overflow-safe "[address, address+size) fits in a 2^bits-byte space?" —
+ * written as size <= limit-address rather than address+size <= limit so a
+ * huge address/size pair can't wrap past `limit` and look valid. */
 static bool s2_range_fits(u64 address, u64 size, unsigned int bits)
 {
     u64 limit = 1ULL << bits;
@@ -122,6 +55,18 @@ static bool s2_page_aligned(u64 value)
     return !(value & (S2_PAGE_SIZE_4KB - 1));
 }
 
+static u64 s2_level_size(unsigned int level)
+{
+    return 1ULL << (12U + 9U * (3U - level));
+}
+
+static unsigned int s2_index(u64 ipa, unsigned int level)
+{
+    return (unsigned int)((ipa >> (12U + 9U * (3U - level))) & 0x1ff);
+}
+
+/* geometry -> VTCR_EL2. T0SZ=64-ipa_bits; SL0 picks the start level; PS is
+ * the output-width encoding; VS only needs setting for 16-bit VMIDs. */
 int relm_stage2_encode_vtcr(const struct relm_stage2_geometry *geometry,
                            u64 *vtcr)
 {
@@ -148,43 +93,18 @@ int relm_stage2_encode_vttbr(const struct relm_stage2_geometry *geometry,
         (geometry->vmid_bits == 8 && vmid > 255))
         return -ERANGE;
 
-    /* The validated address needs no lossy mask; CnP and reserved bits stay 0. */
     *vttbr = (u64)root_pa | ((u64)vmid << S2_VTTBR_VMID_SHIFT);
     return 0;
 }
 
 /*
- * Reads three raw host ID registers (handed in by whatever registers the
- * EL2 runtime, NOT read live from hardware here) and turns them into "the
- * widest stage-2 geometry this host can actually support." Every field
- * extracted below is a literal bitfield from the real architectural
- * register, cross-checked against Linux's own arch/arm64/tools/sysreg
- * table so the shifts/widths here are not guesswork:
- *
- *   - el2  = ID_AA64PFR0_EL1.EL2[11:8]. 1 or 2 both mean "AArch64 EL2 is
- *     implemented" (2 additionally means EL2 also supports AArch32, which
- *     this backend doesn't care about) — anything else (0 = no EL2, or an
- *     AArch32-only encoding) means this backend cannot run here at all.
- *   - granule/granule2 = ID_AA64MMFR0_EL1.TGran4[31:28] and .TGran4_2[43:40].
- *     TGran4_2 is the NEWER, unambiguous field; when it is 0 ("not
- *     implemented, defer to the old field") this falls back to checking
- *     TGran4 directly (0 or 1 both mean "4 KiB supported", using slightly
- *     different historical encodings). When TGran4_2 IS implemented, only
- *     its own 2/3 encodings mean "supported" — this is exactly the
- *     "TGran4_2==0 inherits TGran4" rule called out below.
- *   - pa   = ID_AA64MMFR0_EL1.PARange[3:0], an index into pa_widths[] (NOT
- *     a bit count by itself — that's why there's a lookup table instead of
- *     just shifting a number).
- *   - vmids = ID_AA64MMFR1_EL1.VMIDBits[7:4]. The architecturally confusing
- *     part: the encoding for "16-bit VMIDs supported" is the numeral 2, not
- *     16 and not 1 — hence the explicit `vmids == 2 ? 16 : 8` translation
- *     at the bottom rather than any arithmetic on the raw field.
- *
- * PAGE_SHIFT != S2_GRANULE_SHIFT and CONFIG_CPU_BIG_ENDIAN both bail out
- * because this whole implementation hard-codes 4 KiB little-endian walks
- * (see the file-level "Initial implementation contract" in stage2.h) —
- * these aren't host capability checks, they're "this build of the kernel
- * itself is not one this code was written for" checks.
+ * Host ID registers -> the widest geometry this host can support. Each
+ * field is a real architectural bitfield (Linux arch/arm64/tools/sysreg):
+ * EL2[11:8] (1 or 2 = AArch64 EL2 present), TGran4_2[43:40] (0 defers to
+ * the older TGran4[31:28] field; otherwise only 2/3 mean "supported"),
+ * PARange[3:0] (an index into pa_widths[], not a bit count), VMIDBits[7:4]
+ * (2 means 16-bit VMIDs, not literally 2 — hence the explicit translation
+ * at the bottom rather than arithmetic on the raw field).
  */
 static int s2_decode_limits(const struct relm_stage2_runtime_ops *ops,
                             struct relm_stage2_geometry *limits)
@@ -211,9 +131,8 @@ static int s2_decode_limits(const struct relm_stage2_runtime_ops *ops,
         return -EOPNOTSUPP;
     }
 
-    /* Clamp to 48: this backend's descriptor format (non-LPA2) tops out
-     * there even if the real hardware PARange reports a wider 52/56-bit
-     * address space — see S2_MAX_PA_BITS in stage2.h. */
+    /* This backend's descriptor format (non-LPA2) tops out at 48 bits even
+     * if PARange reports wider — see S2_MAX_PA_BITS. */
     limits->pa_bits = pa_widths[pa] > 48 ? 48 : pa_widths[pa];
     limits->ipa_bits = limits->pa_bits;
     limits->start_level = limits->ipa_bits <= 39 ? 1 : 0;
@@ -221,42 +140,26 @@ static int s2_decode_limits(const struct relm_stage2_runtime_ops *ops,
     return 0;
 }
 
-
-/*
- * One-time handshake: the (future) EL2 runtime calls this exactly once to
- * hand over its callback table and the host ID-register values that
- * describe every CPU it is willing to run guests on. Rejected while a
- * previous registration is still active (s2_runtime_ready) OR while any
- * context still exists (s2_contexts) — re-registering out from under a
- * live context would silently change what "this host's limits" means for
- * tables that already exist. s2_generation == ~0 is treated as permanent
- * exhaustion (-EOVERFLOW) rather than wrapping back to 0, because a
- * wrapped generation counter could make a STALE context's vmid_generation
- * field compare as valid again by coincidence.
- */
+/* One-time handshake: the EL2 runtime hands over its invalidate callback
+ * and the host ID-register values describing every CPU it will run guests
+ * on. x86 has no equivalent step at all (INVEPT needs no registration). */
 int relm_stage2_register_runtime(const struct relm_stage2_runtime_ops *ops)
 {
     struct relm_stage2_geometry limits;
     int ret;
 
-    if (!ops || !ops->begin_update || !ops->end_update ||
-        !ops->publish_table || !ops->invalidate)
+    if (!ops || !ops->invalidate)
         return -EINVAL;
     ret = s2_decode_limits(ops, &limits);
     if (ret)
         return ret;
 
     mutex_lock(&s2_runtime_lock);
-    if (s2_runtime_ready || s2_contexts) {
+    if (s2_runtime_ready) {
         ret = -EBUSY;
-    } else if (s2_generation == ~(u64)0) {
-        ret = -EOVERFLOW;
     } else {
         s2_runtime = *ops;
         s2_limits = limits;
-        ++s2_generation;
-        memset(s2_vmids, 0, sizeof(s2_vmids));
-        s2_vmids[0] = 1; /* Zero is not allocated to a VM. */
         s2_runtime_ready = true;
         ret = 0;
     }
@@ -264,24 +167,41 @@ int relm_stage2_register_runtime(const struct relm_stage2_runtime_ops *ops)
     return ret;
 }
 
-/* Mirror of register: refuses while any context still references the
- * runtime (-EBUSY), otherwise wipes the callback table so nothing can call
- * through a stale s2_runtime after this returns. */
-int relm_stage2_unregister_runtime(void)
+* One-time handshake: the EL2 runtime hands over its invalidate callback
+ * and the host ID-register values describing every CPU it will run guests
+ * on. x86 has no equivalent step at all (INVEPT needs no registration). */
+int relm_stage2_register_runtime(const struct relm_stage2_runtime_ops *ops)
 {
-    int ret = 0;
+    struct relm_stage2_geometry limits;
+    int ret;
+
+    if (!ops || !ops->invalidate)
+        return -EINVAL;
+    ret = s2_decode_limits(ops, &limits);
+    if (ret)
+        return ret;
 
     mutex_lock(&s2_runtime_lock);
-    if (s2_contexts) {
+    if (s2_runtime_ready) {
         ret = -EBUSY;
     } else {
-        s2_runtime_ready = false;
-        memset(&s2_runtime, 0, sizeof(s2_runtime));
+        s2_runtime = *ops;
+        s2_limits = limits;
+        s2_runtime_ready = true;
+        ret = 0;
     }
     mutex_unlock(&s2_runtime_lock);
     return ret;
 }
 
+int relm_stage2_unregister_runtime(void)
+{
+    mutex_lock(&s2_runtime_lock);
+    s2_runtime_ready = false;
+    memset(&s2_runtime, 0, sizeof(s2_runtime));
+    mutex_unlock(&s2_runtime_lock);
+    return 0;
+}
 
 bool relm_stage2_check_support(void)
 {
@@ -293,6 +213,10 @@ bool relm_stage2_check_support(void)
     return supported;
 }
 
+/* Narrow the host's registered ceiling down to exactly the IPA width one
+ * VM asked for; pa_bits/vmid_bits always come straight from the host
+ * ceiling. -EOPNOTSUPP (not -EINVAL) when the request is well-formed but
+ * simply wider than this host supports. */
 int relm_stage2_choose_geometry(unsigned int requested_ipa_bits,
                                struct relm_stage2_geometry *geometry)
 {
@@ -314,244 +238,106 @@ int relm_stage2_choose_geometry(unsigned int requested_ipa_bits,
     }
     mutex_unlock(&s2_runtime_lock);
     return ret;
-
 }
 
-static struct relm_stage2_table *s2_find_table(const struct relm_stage2 *stage2,
-                                             phys_addr_t pa,
-                                             unsigned int level)
-{
-    struct relm_stage2_table *table;
 
-    for (table = stage2->owned_tables; table; table = table->next)
-        if (table->pa == pa && table->level == level)
-            return table;
-    return NULL;
+static void *s2_alloc_table(void)
+{
+    void *table = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+
+    if (unlikely(!table))
+        pr_err("RELM: stage2: failed to alloc table page\n");
+    return table;
+}
+
+static void s2_free_table_tree(s2_entry_t *table, unsigned int level)
+{
+    unsigned int i;
+
+    if (level == 3) {
+        free_page((unsigned long)table);
+        return;
+    }
+    for (i = 0; i < S2_ENTRIES_PER_TABLE; i++) {
+        u64 entry = table[i];
+
+        if ((entry & S2_DESC_TYPE_MASK) == S2_DESC_TABLE)
+            s2_free_table_tree(phys_to_virt(entry & S2_TABLE_ADDR_MASK),
+                               level + 1);
+    }
+    free_page((unsigned long)table);
 }
 
 /*
- * Allocate one new, zeroed 4 KiB table page for `stage2` (which may well
- * be a throwaway `copy`, not the live context) at the given level, record
- * it in stage2->owned_tables, and hand the record back. The PA range
- * check after virt_to_phys() is not paranoia for its own sake: on a host
- * with less than full 48-bit physical memory this can never fail, but if
- * this backend ever runs on a host whose RAM genuinely sits above this
- * context's configured pa_bits, a table page living outside the
- * architecturally expressible range would silently corrupt the address
- * field of whatever descriptor points at it — caught here instead, as
- * -ERANGE, before that table is ever linked into a tree.
- */
-static int s2_alloc_table(struct relm_stage2 *stage2, unsigned int level,
-                          struct relm_stage2_table **out)
-{
-    struct relm_stage2_table *table;
-
-    table = kzalloc(sizeof(*table), GFP_KERNEL);
-    if (!table)
-        return -ENOMEM;
-    table->entries = (s2_entry_t *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
-    if (!table->entries) {
-        kfree(table);
-        return -ENOMEM;
-    }
-    table->pa = virt_to_phys(table->entries);
-    if (!s2_page_aligned(table->pa) ||
-        !s2_range_fits(table->pa, S2_TABLE_SIZE, stage2->geometry.pa_bits)) {
-        free_page((unsigned long)table->entries);
-        kfree(table);
-        return -ERANGE;
-    }
-    table->level = level;
-    table->next = stage2->owned_tables;
-    stage2->owned_tables = table;
-    *out = table;
-    return 0;
-}
-
-static void s2_free_tables(struct relm_stage2_table *table)
-{
-    while (table) {
-        struct relm_stage2_table *next = table->next;
-
-        free_page((unsigned long)table->entries);
-        kfree(table);
-        table = next;
-    }
-}
-
-static int s2_alloc_vmid(unsigned int bits)
-{
-    unsigned int id;
-
-    for (id = 1; id < (1U << bits); ++id) {
-        u64 bit = 1ULL << (id % 64U);
-
-        if (!(s2_vmids[id / 64U] & bit)) {
-            s2_vmids[id / 64U] |= bit;
-            return (int)id;
-        }
-    }
-    return -ENOSPC; /* No rollover without a global invalidation protocol. */
-}
-
-/*
- * Build a brand-new, empty stage-2 context: encode VTCR up front (so a bad
- * geometry is rejected before anything is allocated), check the request
- * against this host's registered ceiling, allocate the context object
- * itself, initialize its update_lock, allocate just the root table (every
- * other table gets allocated lazily by s2_insert_leaf as mappings are
- * added), and claim one VMID from the global namespace.
- *
- * Failure unwinds in reverse allocation order via the goto labels below —
- * free_tables only runs if the VMID allocation step failed (so the root
- * table that was already allocated gets freed too), free_context runs if
- * even the root-table allocation failed (nothing to free but the struct
- * itself), and unlock covers every earlier failure. s2_runtime_lock is
- * held across the ENTIRE sequence (not just the VMID allocation) because
- * s2_limits/s2_runtime_ready/s2_generation are all read here and must not
- * change mid-construction.
+ * Build a brand-new, empty context: encode VTCR up front (rejects a bad
+ * geometry before anything is allocated), check the request against this
+ * host's registered ceiling, allocate the context struct and its root
+ * table, and take the caller-supplied VMID as-is (bounds-checked — see the
+ * struct relm_stage2 comment in stage2.h for why there's no allocator).
  */
 struct relm_stage2 *relm_stage2_context_create(
-    const struct relm_stage2_geometry *geometry)
+    const struct relm_stage2_geometry *geometry, u16 vmid)
 {
     struct relm_stage2 *stage2;
-    struct relm_stage2_table *root;
     u64 vtcr;
     int ret;
 
     ret = relm_stage2_encode_vtcr(geometry, &vtcr);
     if (ret)
         return ERR_PTR(ret);
+    if (geometry->vmid_bits == 8 && vmid > 255)
+        return ERR_PTR(-ERANGE);
 
     mutex_lock(&s2_runtime_lock);
     if (!s2_runtime_ready || geometry->ipa_bits > s2_limits.ipa_bits ||
         geometry->pa_bits > s2_limits.pa_bits ||
         geometry->vmid_bits > s2_limits.vmid_bits) {
-        ret = -EOPNOTSUPP;
-        goto unlock;
+        mutex_unlock(&s2_runtime_lock);
+        return ERR_PTR(-EOPNOTSUPP);
     }
+    mutex_unlock(&s2_runtime_lock);
+
     stage2 = kzalloc(sizeof(*stage2), GFP_KERNEL);
-    if (!stage2) {
-        ret = -ENOMEM;
-        goto unlock;
+    if (!stage2)
+        return ERR_PTR(-ENOMEM);
+
+    stage2->root = s2_alloc_table();
+    if (!stage2->root) {
+        kfree(stage2);
+        return ERR_PTR(-ENOMEM);
     }
+    stage2->root_pa = virt_to_phys(stage2->root);
     stage2->geometry = *geometry;
     stage2->vtcr_el2 = vtcr;
-    mutex_init(&stage2->update_lock);
-    ret = s2_alloc_table(stage2, geometry->start_level, &root);
-    if (ret)
-        goto free_context;
-    ret = s2_alloc_vmid(geometry->vmid_bits);
-    if (ret < 0)
-        goto free_tables;
+    stage2->vmid = vmid;
+    mutex_init(&stage2->lock);
 
-    stage2->root = root->entries;
-    stage2->root_pa = root->pa;
-    stage2->vmid = (u16)ret;
-    stage2->vmid_generation = s2_generation;
-    stage2->vmid_valid = true;
-    ++s2_contexts; /* Pins callbacks until destruction has finished using them. */
-    mutex_unlock(&s2_runtime_lock);
-
-    /* An empty table also needs publication before its first hardware walk. */
-    s2_runtime.publish_table(stage2->root, S2_TABLE_SIZE);
     return stage2;
-
-free_tables:
-    s2_free_tables(stage2->owned_tables);
-free_context:
-    kfree(stage2);
-unlock:
-    mutex_unlock(&s2_runtime_lock);
-    return ERR_PTR(ret);
 }
 
-/*
- * First half of every mutating operation's four-step shape (see the file
- * banner at the top). Order matters: the runtime's own entry gate is
- * acquired FIRST, then this context's update_lock — establishing a single
- * global lock order (gate -> update_lock) that every caller follows, which
- * is what avoids a deadlock between two contexts' updates running on
- * different CPUs. Once both are held, this re-validates two things that
- * could have changed since the caller last looked at the context:
- *   - vmid_valid / vmid_generation: catches a context that was destroyed
- *     or whose VMID was invalidated by a runtime re-registration between
- *     the caller obtaining the pointer and getting here (-ESTALE).
- *   - failed, unless the caller explicitly allows operating on a failed
- *     context (allow_failed=true — used by destroy/invalidate, which need
- *     to be able to tear down or re-flush a context that a PREVIOUS
- *     mutation already marked failed).
- * Either check failing releases both locks/the gate again before
- * returning, so a failed s2_begin_update() never leaves anything held.
- */
-static int s2_begin_update(struct relm_stage2 *stage2, bool allow_failed)
-{
-    int ret;
-
-    if (IS_ERR_OR_NULL(stage2))
-        return -EINVAL;
-    /* The caller's context lifetime pins the runtime registration. */
-    ret = s2_runtime.begin_update(stage2);
-    if (ret)
-        return ret < 0 ? ret : -EIO;
-    mutex_lock(&stage2->update_lock);
-    if (!stage2->vmid_valid || stage2->vmid_generation != s2_generation)
-        ret = -ESTALE;
-    else if (stage2->failed && !allow_failed)
-        ret = -EIO;
-    if (ret) {
-        mutex_unlock(&stage2->update_lock);
-        s2_runtime.end_update(stage2, false);
-    }
-    return ret;
-}
-
-/*
- * Second half of the four-step shape: release update_lock, then tell the
- * runtime whether guest entry should reopen for this context. "Runnable"
- * means exactly "still has a valid VMID AND wasn't just marked failed" —
- * computed fresh here rather than trusted from the caller, since several
- * different failure paths (a bad commit, a failed invalidate) can set
- * `failed` right before this runs.
- */
-static void s2_end_update(struct relm_stage2 *stage2)
-{
-    bool runnable = stage2->vmid_valid && !stage2->failed;
-
-    mutex_unlock(&stage2->update_lock);
-    s2_runtime.end_update(stage2, runnable);
-}
-
-
-
-/*
- * Ask the runtime to flush every cached stage-1+stage-2 translation
- * tagged with this context's current (vtcr_el2, root_pa, vmid) — i.e. the
- * root/VMID combination that is ABOUT to stop being selected (either
- * because a new tree is about to be swapped in, or because the context is
- * being torn down). Must only ever be called with the entry gate already
- * held (via s2_begin_update), which is what guarantees no CPU can refill a
- * translation for this exact combination while the flush is happening —
- * without that gate, a CPU could walk and cache a translation again a
- * moment after this "finishes." On failure the context is marked `failed`
- * so it can never again be considered runnable by s2_end_update.
- */
-static int s2_invalidate_locked(struct relm_stage2 *stage2)
+static int s2_invalidate(struct relm_stage2 *stage2)
 {
     u64 vttbr;
     int ret;
 
     ret = relm_stage2_encode_vttbr(&stage2->geometry, stage2->root_pa,
-                                  stage2->vmid, &vttbr);
-    if (!ret)
-        ret = s2_runtime.invalidate(stage2->vtcr_el2, vttbr);
-    if (ret) {
-        stage2->failed = true;
-        return ret < 0 ? ret : -EIO;
-    }
-    return 0;
+                                   stage2->vmid, &vttbr);
+    if (ret)
+        return ret;
+    return s2_runtime.invalidate(stage2->vtcr_el2, vttbr);
 }
 
+int relm_stage2_invalidate_context(struct relm_stage2 *stage2)
+{
+    int ret;
+
+    if (IS_ERR_OR_NULL(stage2))
+        return -EINVAL;
+    mutex_lock(&stage2->lock);
+    ret = s2_invalidate(stage2);
+    mutex_unlock(&stage2->lock);
+    return ret;
+}
 
 int relm_stage2_context_destroy(struct relm_stage2 *stage2)
 {
@@ -559,58 +345,427 @@ int relm_stage2_context_destroy(struct relm_stage2 *stage2)
 
     if (!stage2)
         return 0;
-    ret = s2_begin_update(stage2, true);
+    mutex_lock(&stage2->lock);
+    ret = s2_invalidate(stage2);
+    mutex_unlock(&stage2->lock);
     if (ret)
         return ret;
-    ret = s2_invalidate_locked(stage2);
-    if (ret) {
-        s2_end_update(stage2);
-        return ret; /* Caller still owns context, VMID, and every table. */
-    }
 
-    s2_free_tables(stage2->owned_tables);
-    stage2->owned_tables = NULL;
-    stage2->root = NULL;
-    stage2->vmid_valid = false;
-    s2_end_update(stage2); /* Still pins the provider; never reopens guest entry. */
-
-    mutex_lock(&s2_runtime_lock);
-    s2_vmids[stage2->vmid / 64U] &= ~(1ULL << (stage2->vmid % 64U));
-    --s2_contexts;
-    mutex_unlock(&s2_runtime_lock);
+    s2_free_table_tree(stage2->root, stage2->geometry.start_level);
     kfree(stage2);
     return 0;
 }
 
-/* Byte size of whatever one descriptor at this level covers: L3=4 KiB,
- * L2=2 MiB, L1=1 GiB, L0=512 GiB — each level is 9 bits (512 entries)
- * wider than the next, on top of the 12-bit (4 KiB) page granule. */
-static u64 s2_level_size(unsigned int level)
+/*
+ * get-or-create the child table a non-leaf entry should point at — the
+ * ARM analogue of relm_ept_get_or_create_table(). If the slot is already
+ * a table, just resolve its PA back to a host VA; otherwise allocate a
+ * fresh table and wire the parent entry to it. No AF/reserved-bit
+ * validation here, same trust level ept.c's version has.
+ */
+static s2_entry_t *s2_get_or_create(s2_entry_t *entry)
 {
-    return 1ULL << (12U + 9U * (3U - level));
+    void *child;
+
+    if ((*entry & S2_DESC_TYPE_MASK) == S2_DESC_TABLE)
+        return phys_to_virt(*entry & S2_TABLE_ADDR_MASK);
+
+    child = s2_alloc_table();
+    if (!child)
+        return NULL;
+    *entry = virt_to_phys(child) | S2_DESC_TABLE;
+    return child;
 }
 
-/* Which of the 512 entries in THIS level's table does this IPA fall under —
- * i.e. bits [20:12] for L3, [29:21] for L2, [38:30] for L1, [47:39] for L0. */
-static unsigned int s2_index(u64 ipa, unsigned int level)
+/* Descend from the root to `leaf_level`, allocating intermediate tables as
+ * needed, then write the leaf. An existing mapping is overwritten with a
+ * warning — the same behaviour relm_ept_map_page has, not an error. */
+static int s2_map_one(struct relm_stage2 *stage2, u64 ipa, phys_addr_t pa,
+                      u64 flags, unsigned int leaf_level)
 {
-    return (unsigned int)((ipa >> (12U + 9U * (3U - level))) & 0x1ff);
-}
+    s2_entry_t *table = stage2->root;
+    s2_entry_t *leaf;
+    unsigned int level;
 
-static int s2_validate_flags(u64 flags)
-{
-    u64 memory = flags & S2_MEMATTR_MASK;
+    for (level = stage2->geometry.start_level; level < leaf_level; level++) {
+        table = s2_get_or_create(&table[s2_index(ipa, level)]);
+        if (!table)
+            return -ENOMEM;
+    }
 
-    if (flags & ~S2_LEAF_FLAGS_MASK)
-        return -EINVAL;
-    if (!(flags & S2_ACCESS_READ) || (flags & S2_SH_MASK) == (1ULL << 8))
-        return -EINVAL;
-    if (memory != S2_MEMTYPE_NORMAL_WB && memory != S2_MEMTYPE_NORMAL_NC &&
-        memory != S2_MEMTYPE_DEVICE_NGNRNE && memory != S2_MEMTYPE_DEVICE_NGNRE)
-        return -EINVAL;
-    if (memory != S2_MEMTYPE_NORMAL_WB && !(flags & S2_XN))
-        return -EINVAL;
+    leaf = &table[s2_index(ipa, leaf_level)];
+    if (*leaf & S2_DESC_VALID) {
+        pr_warn("RELM: stage2 IPA 0x%llx already mapped, overwriting\n", ipa);
+    } else {
+        if (leaf_level == 3)
+            stage2->stats.pages_4kb++;
+        else
+            stage2->stats.pages_2mb++;
+        stage2->stats.total_mapped += s2_level_size(leaf_level);
+    }
+    *leaf = (pa & S2_PAGE_ADDR_MASK) | flags | S2_AF |
+            (leaf_level == 3 ? S2_DESC_PAGE : S2_DESC_BLOCK);
     return 0;
+}
+
+static int s2_map(struct relm_stage2 *stage2, u64 ipa, phys_addr_t pa,
+                  u64 flags, unsigned int leaf_level)
+{
+    int ret;
+
+    if (IS_ERR_OR_NULL(stage2) || !s2_page_aligned(ipa) || !s2_page_aligned(pa))
+        return -EINVAL;
+    if (!(flags & S2_ACCESS_READ))
+        return -EINVAL;
+    if (!s2_range_fits(ipa, s2_level_size(leaf_level), stage2->geometry.ipa_bits) ||
+        !s2_range_fits(pa, s2_level_size(leaf_level), stage2->geometry.pa_bits))
+        return -ERANGE;
+
+    mutex_lock(&stage2->lock);
+    ret = s2_map_one(stage2, ipa, pa, flags, leaf_level);
+    mutex_unlock(&stage2->lock);
+    return ret;
+}
+
+int relm_stage2_map_page(struct relm_stage2 *stage2, u64 ipa,
+                        phys_addr_t pa, u64 flags)
+{
+    return s2_map(stage2, ipa, pa, flags, 3);
+}
+
+int relm_stage2_map_huge_page(struct relm_stage2 *stage2, u64 ipa,
+                             phys_addr_t pa, u64 flags)
+{
+    if ((ipa | (u64)pa) & (S2_PAGE_SIZE_2MB - 1))
+        return -EINVAL;
+    return s2_map(stage2, ipa, pa, flags, 2);
+}
+
+/* Page-by-page loop, same shape as relm_ept_map_range. */
+int relm_stage2_map_range(struct relm_stage2 *stage2, u64 ipa,
+                         phys_addr_t pa, u64 size, u64 flags)
+{
+    u64 offset;
+    int ret;
+
+    if (!size || !s2_page_aligned(size))
+        return -EINVAL;
+    for (offset = 0; offset < size; offset += S2_PAGE_SIZE_4KB) {
+        ret = relm_stage2_map_page(stage2, ipa + offset, pa + offset, flags);
+        if (ret)
+            return ret;
+    }
+    return 0;
+}
+
+/* Does [ipa, ipa+size) touch any reserved MMIO window on this VM? Walks
+ * the live registry via the same count/at iterators ept_range_overlaps_mmio
+ * (ept.c) uses — no local snapshot kept. */
+static bool s2_range_overlaps_mmio(struct relm_vm *vm, u64 ipa, u64 size)
+{
+    unsigned int i, count;
+    struct relm_mmio_region region;
+    u64 end = ipa + size;
+
+    if (!vm)
+        return false;
+    count = relm_vm_mmio_region_count(vm);
+    for (i = 0; i < count; i++) {
+        if (relm_vm_mmio_region_at(vm, i, &region) < 0)
+            continue;
+        if (ipa < region.gpa_start + region.size && region.gpa_start < end)
+            return true;
+    }
+    return false;
+}
+
+/* MMIO-aware 4 KiB-only guest RAM mapper: same page-by-page loop as
+ * relm_stage2_map_range, plus skipping any page that overlaps a reserved
+ * MMIO window — left unmapped so it still traps as a stage-2 abort into
+ * the (future) MMIO emulation path instead of being RAM-backed. */
+int relm_stage2_map_guest_ram_4kb(struct relm_stage2 *stage2,
+                                 struct relm_vm *vm, u64 ipa,
+                                 phys_addr_t pa, u64 size, u64 flags)
+{
+    u64 offset;
+    int ret;
+
+    if (!vm || !size || !s2_page_aligned(size))
+        return -EINVAL;
+    for (offset = 0; offset < size; offset += S2_PAGE_SIZE_4KB) {
+        if (s2_range_overlaps_mmio(vm, ipa + offset, S2_PAGE_SIZE_4KB))
+            continue;
+        ret = relm_stage2_map_page(stage2, ipa + offset, pa + offset, flags);
+        if (ret)
+            return ret;
+    }
+    return 0;
+}
+
+
+/*
+ * Guest RAM mapper preferring 2 MiB blocks: walks in 2 MiB strides, using
+ * one huge leaf when the stride is aligned, whole, and MMIO-free, else
+ * falling back to relm_stage2_map_guest_ram_4kb for just that stride —
+ * same degrade-to-page-granularity-at-an-MMIO-boundary behaviour as
+ * relm_ept_map_guest_ram_huge.
+ */
+int relm_stage2_map_guest_ram_huge(struct relm_stage2 *stage2,
+                                  struct relm_vm *vm, u64 ipa,
+                                  phys_addr_t pa, u64 size, u64 flags)
+{
+    u64 end, offset = 0;
+    int ret;
+
+    if (!vm || !size || !s2_page_aligned(size))
+        return -EINVAL;
+    end = ipa + size;
+
+    while (ipa + offset < end) {
+        u64 address = ipa + offset;
+        phys_addr_t physical = pa + offset;
+        u64 remaining = end - address;
+
+        if (remaining >= S2_PAGE_SIZE_2MB &&
+            !((address | (u64)physical) & (S2_PAGE_SIZE_2MB - 1)) &&
+            !s2_range_overlaps_mmio(vm, address, S2_PAGE_SIZE_2MB)) {
+            ret = relm_stage2_map_huge_page(stage2, address, physical, flags);
+            if (ret)
+                return ret;
+            offset += S2_PAGE_SIZE_2MB;
+        } else {
+            u64 to_boundary = S2_PAGE_SIZE_2MB - (address & (S2_PAGE_SIZE_2MB - 1));
+            u64 chunk = min(remaining, to_boundary);
+
+            ret = relm_stage2_map_guest_ram_4kb(stage2, vm, address, physical,
+                                               chunk, flags);
+            if (ret)
+                return ret;
+            offset += chunk;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Walk down to whatever leaf covers `ipa`, following table descriptors
+ * via phys_to_virt() directly — no allocation ledger to consult, same
+ * trust level as ept.c's own walkers. Fills *out_pa/*out_base/*out_size
+ * from whichever leaf (page or block) was found; -ENOENT on a hole.
+ */
+static int s2_walk(struct relm_stage2 *stage2, u64 ipa, u64 *out_pa,
+                   u64 *out_base, u64 *out_size)
+{
+    s2_entry_t *table = stage2->root;
+    unsigned int level;
+
+    for (level = stage2->geometry.start_level; level < S2_LEVELS; level++) {
+        s2_entry_t entry = table[s2_index(ipa, level)];
+        u64 type = entry & S2_DESC_TYPE_MASK;
+
+        if (!entry)
+            return -ENOENT;
+        if (level < 3 && type == S2_DESC_TABLE) {
+            table = phys_to_virt(entry & S2_TABLE_ADDR_MASK);
+            continue;
+        }
+        /* Reaching here at L0 means the entry was NOT a table descriptor
+         * (that case already continued the loop above) — L0 can never be
+         * a leaf itself, it must always point to L1, so this is a
+         * corrupt entry, not a giant 512 GiB mapping. Otherwise: block at
+         * L1/L2, page at L3. */
+        if (level == 0 ||
+            (level == 3 && type != S2_DESC_PAGE) ||
+            (level < 3 && type != S2_DESC_BLOCK))
+            return -EINVAL;
+
+        *out_size = s2_level_size(level);
+        *out_base = ipa & ~(*out_size - 1);
+        *out_pa = entry & S2_PAGE_ADDR_MASK & ~(*out_size - 1);
+        return 0;
+    }
+    return -ENOENT;
+}
+
+int relm_stage2_get_mapping(struct relm_stage2 *stage2, u64 ipa, phys_addr_t *pa)
+{
+    u64 leaf_pa, base, size;
+    int ret;
+
+    if (IS_ERR_OR_NULL(stage2) || !pa)
+        return -EINVAL;
+    mutex_lock(&stage2->lock);
+    ret = s2_walk(stage2, ipa, &leaf_pa, &base, &size);
+    if (!ret)
+        *pa = leaf_pa + (ipa - base);
+    mutex_unlock(&stage2->lock);
+    return ret;
+}
+
+/*
+ * Remove whatever single leaf covers `ipa`. `ipa` must be that leaf's own
+ * aligned base (checked via s2_walk's *out_base) — unlike a 4 KiB page, a
+ * 2 MiB block can't be partially cleared, so a request that lands inside
+ * one without naming its exact start is rejected (-EINVAL) rather than
+ * zeroing the whole block out from under the rest of its range.
+ */
+int relm_stage2_unmap_page(struct relm_stage2 *stage2, u64 ipa)
+{
+    u64 leaf_pa, base, size;
+    s2_entry_t *table;
+    unsigned int level;
+    int ret;
+
+    if (IS_ERR_OR_NULL(stage2))
+        return -EINVAL;
+
+    mutex_lock(&stage2->lock);
+    ret = s2_walk(stage2, ipa, &leaf_pa, &base, &size);
+    if (ret == -ENOENT) {
+        mutex_unlock(&stage2->lock);
+        return 0;
+    }
+    if (ret) {
+        mutex_unlock(&stage2->lock);
+        return ret;
+    }
+    if (base != ipa) {
+        mutex_unlock(&stage2->lock);
+        return -EINVAL;
+    }
+
+    table = stage2->root;
+    for (level = stage2->geometry.start_level; s2_level_size(level) != size; level++)
+        table = phys_to_virt(table[s2_index(ipa, level)] & S2_TABLE_ADDR_MASK);
+
+    table[s2_index(ipa, level)] = S2_DESC_INVALID;
+    if (level == 3)
+        stage2->stats.pages_4kb--;
+    else
+        stage2->stats.pages_2mb--;
+    stage2->stats.total_mapped -= size;
+    mutex_unlock(&stage2->lock);
+    return 0;
+}
+
+/* Page-by-page/block-by-block loop, same shape as relm_stage2_map_range. */
+int relm_stage2_unmap_range(struct relm_stage2 *stage2, u64 ipa, u64 size)
+{
+    u64 end = ipa + size;
+    int ret;
+
+    if (!size || !s2_page_aligned(ipa) || !s2_page_aligned(size))
+        return -EINVAL;
+    while (ipa < end) {
+        ret = relm_stage2_unmap_page(stage2, ipa);
+        if (ret)
+            return ret;
+        ipa += S2_PAGE_SIZE_4KB;
+    }
+    return 0;
+}
+
+
+/*
+ * VM-level entry point: pick the default IPA width, validate every
+ * already-registered RAM region fits it, create the context using
+ * vm->vm_id directly as the VMID (see the struct relm_stage2 comment in
+ * stage2.h), and publish it.
+ */
+int relm_setup_stage2(struct relm_vm *vm)
+{
+    struct relm_stage2_geometry geometry;
+    struct relm_stage2 *stage2;
+    struct guest_mem_region *region;
+    int ret;
+
+    if (!vm)
+        return -EINVAL;
+    mutex_lock(&vm->arch.config_lock);
+    if (vm->arch.stage2) {
+        ret = -EEXIST;
+        goto unlock;
+    }
+    ret = relm_stage2_choose_geometry(S2_DEFAULT_IPA_BITS, &geometry);
+    if (ret)
+        goto unlock;
+    for (region = vm->memory.mem_regions; region; region = region->next) {
+        if (!s2_range_fits(region->gpa_start, region->size, geometry.ipa_bits)) {
+            ret = -ERANGE;
+            goto unlock;
+        }
+    }
+    stage2 = relm_stage2_context_create(&geometry, (u16)vm->vm_id);
+    if (IS_ERR(stage2)) {
+        ret = (int)PTR_ERR(stage2);
+        goto unlock;
+    }
+    vm->arch.stage2 = stage2;
+    ret = 0;
+unlock:
+    mutex_unlock(&vm->arch.config_lock);
+    return ret;
+}
+
+
+int relm_stage2_handle_fault(struct vcpu *vcpu)
+{
+    const struct guest_regs *regs;
+    u64 ec, type;
+
+    if (!vcpu || !vcpu->vm || !vcpu->vm->arch.stage2 ||
+        vcpu->arch.exit_kind != RELM_ARM64_EXIT_SYNC)
+        return -EINVAL;
+    regs = &vcpu->arch.regs;
+    ec = regs->esr_el2 & S2_ESR_EC_MASK;
+    if (ec != S2_ESR_EC_IABT_LOWER && ec != S2_ESR_EC_DABT_LOWER)
+        return -EINVAL;
+    type = regs->esr_el2 & S2_ESR_FSC_TYPE_MASK;
+    pr_err("RELM: stage2 %s abort: PC=%#llx ESR=%#llx FAR=%#llx HPFAR=%#llx\n",
+           ec == S2_ESR_EC_IABT_LOWER ? "instruction" : "data",
+           regs->pc, regs->esr_el2, regs->far_el2, regs->hpfar_el2);
+    if (regs->esr_el2 & S2_ESR_S1PTW)
+        pr_err("RELM: abort occurred during a guest stage-1 table walk\n");
+
+    return type == S2_ESR_FSC_PERMISSION ? -EACCES : -EFAULT;
+}
+
+static void s2_dump_table(s2_entry_t *table, unsigned int level, u64 base)
+{
+    unsigned int i;
+
+    for (i = 0; i < S2_ENTRIES_PER_TABLE; i++) {
+        u64 entry = table[i];
+        u64 address = base + i * s2_level_size(level);
+        u64 type = entry & S2_DESC_TYPE_MASK;
+
+        if (!entry)
+            continue;
+        if (level < 3 && type == S2_DESC_TABLE) {
+            s2_dump_table(phys_to_virt(entry & S2_TABLE_ADDR_MASK),
+                         level + 1, address);
+        } else {
+            pr_info("RELM: stage2 L%u IPA=%#llx PA=%#llx size=%#llx %c%c%c attr=%#llx\n",
+                    level, address, entry & S2_PAGE_ADDR_MASK,
+                    s2_level_size(level), entry & S2_ACCESS_READ ? 'r' : '-',
+                    entry & S2_ACCESS_WRITE ? 'w' : '-',
+                    entry & S2_XN ? '-' : 'x', entry & S2_MEMATTR_MASK);
+        }
+    }
+}
+
+void relm_stage2_dump_tables(struct relm_stage2 *stage2)
+{
+    if (IS_ERR_OR_NULL(stage2))
+        return;
+    mutex_lock(&stage2->lock);
+    pr_info("RELM: stage2 root=%#llx VTCR=%#llx VMID=%u\n",
+            (u64)stage2->root_pa, stage2->vtcr_el2, (unsigned int)stage2->vmid);
+    pr_info("RELM: stage2 leaves: 4K=%llu 2M=%llu 1G=%llu bytes=%llu\n",
+            stage2->stats.pages_4kb, stage2->stats.pages_2mb,
+            stage2->stats.pages_1gb, stage2->stats.total_mapped);
+    s2_dump_table(stage2->root, stage2->geometry.start_level, 0);
+    mutex_unlock(&stage2->lock);
 }
 
 
