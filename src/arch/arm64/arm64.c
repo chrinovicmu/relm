@@ -24,6 +24,65 @@ static void arm64_vcpu_free(struct vcpu *vcpu)
     (void)vcpu;
 }
 
+static int relm_setup_guest_ctrls_vhe(struct vcpu *vcpu)
+{
+    struct relm_arm_guest_ctrls ctrls = {0}; 
+    u64 host_hcr; 
+    u64 pfr0; 
+    u64 dfr0; 
+    u64 mmfr1; 
+    u64 pmuver; 
+
+    if(read_sysreg(CurrentEl) != CurrentEl2){
+        pr_err("RELM: VCPU%u: arm64: VHE requires the host kernel at EL2\n",
+               vcpu->vpid);
+        return -EOPNOTSUPP;
+    }
+
+    host_hcr = read_sysreg(hcr_el2); 
+    if((host_hcr & (HCR_E2H | HCR_TGE)) != (HCR_E2H | HCR_TGE)){
+        pr_err("RELM: VCPU%u: arm64: expected host E2H=1/TGE=1, HCR_EL2=%#llx\n",
+               vcpu->vpid, host_hcr);
+        return -EOPNOTSUPP;
+    }
+
+    pfr0 = read_sysreg(id_aa64pfr0_el1);
+    dfr0 = read_sysreg(id_aa64dfr0_el1);
+    mmfr1 = read_sysreg(id_aa64mmfr1_el1); 
+
+    relm_arm64_enable_vhe(&ctrls);
+    relm_arm64_clear_trap_general_exceptions(&ctrls);
+    relm_arm64_set_execution_state_64bit(&ctrls);
+    relm_arm64_enable_stage2_mmu(&ctrls);
+
+    relm_arm64_route_physical_serror_to_el2(&ctrls);
+    relm_arm64_route_physical_irq_to_el2(&ctrls);
+    relm_arm64_route_physical_fiq_to_el2(&ctrls);
+
+    relm_arm64_set_trap_wfi(&ctrls);
+    relm_arm64_set_trap_wfe(&ctrls);
+    relm_arm64_set_trap_smc(&ctrls);
+
+    relm_arm64_set_trap_id_group3(&ctrls);
+    relm_arm64_set_trap_id_group2(&ctrls);
+    relm_arm64_set_trap_id_group1(&ctrls);
+
+    relm_arm64_set_trap_auxiliary_control(&ctrls);
+    relm_arm64_set_trap_implementation_defined(&ctrls);
+
+    relm_arm64_set_trap_cache_set_way(&ctrls);
+    relm_arm64_enable_set_way_invalidation_override(&ctrls);
+    relm_arm64_set_trap_virtual_memory_writes(&ctrls);
+
+    relm_arm64_enable_page_table_walk_protection(&ctrls);
+    relm_arm64_set_barrier_upgrade_inner_shareable(&ctrls);
+    relm_arm64_enable_force_broadcast(&ctrls);
+
+
+    vcpu->arch.ctrls = ctrls;
+    return 0; 
+
+}
 static int relm_setup_guest_state_aarch64(struct vcpu *vcpu)
 {
     u64 pstate;
@@ -85,7 +144,7 @@ struct relm_arm64_host_state {
 };
 static DEFINE_PER_CPU(struct relm_arm64_host_state, relm_arm64_host_state);
 
-static int relm_arm64_activate_traps(struct vcpu *vcpu)
+static int relm_arm64_guest_entry(struct vcpu *vcpu)
 {
     struct relm_arm64_host_state *host = this_cpu_ptr(&relm_arm64_host_state); 
     struct relm_arm64_host_state *eli = &vcpu->arch.eli;
@@ -164,20 +223,20 @@ static int relm_arm64_activate_traps(struct vcpu *vcpu)
     write_sysreg(vcpu->arch.virtual_midr, vpidr_el2);
     write_sysreg(vcpu->arch.virtual_mpidr, vmpidr_el2);
 
-    write_sysreg(vcpu->arch.controls.cptr_el2, cptr_el2);
-    write_sysreg(vcpu->arch.controls.mdcr_el2, mdcr_el2);
-    write_sysreg(vcpu->arch.controls.cnthctl_el2, cnthctl_el2);
+    write_sysreg(vcpu->arch.ctrls.cptr_el2, cptr_el2);
+    write_sysreg(vcpu->arch.ctrls.mdcr_el2, mdcr_el2);
+    write_sysreg(vcpu->arch.ctrls.cnthctl_el2, cnthctl_el2);
 
     write_sysreg((u64)relm_hyp_vectors, vbar_el2);
     /* HCR_EL2 last: writing it is what clears TGE and starts routing
      * EL0/EL1 exceptions to relm_hyp_vectors instead of the host. */
-    write_sysreg(vcpu->arch.controls.hcr_el2, hcr_el2);
+    write_sysreg(vcpu->arch.ctrls.hcr_el2, hcr_el2);
     isb();
 
     return 0;
 }
 
-static void relm_arm64_deactivate_traps(struct vcpu *vcpu)
+static void relm_arm64_guest_exit(struct vcpu *vcpu)
 {
     struct relm_arm64_host_state *host = this_cpu_ptr(&relm_arm64_host_state);
     struct relm_arm64_el1_state *el1 = &vcpu->arch.el1;
@@ -253,13 +312,13 @@ static int arm64_vcpu_run(struct vcpu *vcpu)
     int code;
     int ret;
 
-    ret = relm_arm64_activate_traps(vcpu);
+    ret = relm_arm64_guest_entry(vcpu);
     if (ret)
         return ret;
 
     code = relm_arm64_vcpu_run_asm(&vcpu->arch);
 
-    relm_arm64_deactivate_traps(vcpu);
+    relm_arm64_guest_exit(vcpu);
 
     switch (code) {
     case RELM_ARM64_EXIT_SYNC:
@@ -361,8 +420,8 @@ static void arm64_dump_regs(struct vcpu *vcpu)
             vcpu->arch.timer.cntp_cval, vcpu->arch.timer.cntp_ctl);
 
     pr_info("RELM: VCPU%u hcr_el2=%#llx cptr_el2=%#llx mdcr_el2=%#llx cnthctl_el2=%#llx\n",
-            vcpu->vpid, vcpu->arch.controls.hcr_el2, vcpu->arch.controls.cptr_el2,
-            vcpu->arch.controls.mdcr_el2, vcpu->arch.controls.cnthctl_el2);
+            vcpu->vpid, vcpu->arch.ctrls.hcr_el2, vcpu->arch.ctrls.cptr_el2,
+            vcpu->arch.ctrls.mdcr_el2, vcpu->arch.ctrls.cnthctl_el2);
 
     pr_info("RELM: VCPU%u virtual_midr=%#llx virtual_mpidr=%#llx\n",
             vcpu->vpid, vcpu->arch.virtual_midr, vcpu->arch.virtual_mpidr);

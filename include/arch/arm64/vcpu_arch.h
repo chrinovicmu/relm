@@ -98,7 +98,7 @@ struct relm_arm64_fp_state {
     u64 reserved;
 } __attribute__((aligned(16)));
 
-struct relm_arm64_guest_controls{
+struct relm_arm64_guest_ctrls{
     u64 hcr_el2; 
     u64 cptr_el2; 
     u64 mdcr_el2; 
@@ -108,8 +108,8 @@ struct relm_arm64_guest_controls{
 struct vcpu_arch{
     struct guest_regs regs; 
     struct relm_arch64_el1_state el1; 
-    struct relm_arm64_timer_state; 
-    struct relm_arm64_guest_controls; 
+    struct relm_arm64_timer_state time_state; 
+    struct relm_arm64_guest_ctrls ctrls; 
     enum relm_arm64_exit_kind exit_kind; 
     bool initialized; 
 }
