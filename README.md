@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="logo.jpg" alt="Relm Logo" width="250">
-</p>
-
 <h1 align="center">Relm Hypervisor</h1>
 
 <p align="center">
