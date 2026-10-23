@@ -78,6 +78,31 @@ static int relm_setup_guest_ctrls_vhe(struct vcpu *vcpu)
     relm_arm64_set_barrier_upgrade_inner_shareable(&ctrls);
     relm_arm64_enable_force_broadcast(&ctrls);
 
+    if (FIELD_GET(ID_AA64MMFR1_EL1_LO, mmfr1))
+        relm_arm64_set_trap_lor(&controls);
+    if (FIELD_GET(ID_AA64PFR0_EL1_RAS, pfr0))
+        relm_arm64_set_trap_ras_error_records(&controls);
+
+    relm_arm64_enable_fp_simd(&controls);
+
+    /* TTA[28] traps trace-register access; TAM[30] traps AMU registers. */
+    if (FIELD_GET(ID_AA64DFR0_EL1_TraceVer, dfr0))
+        relm_arm64_set_trap_trace_access(&controls);
+    if (FIELD_GET(ID_AA64PFR0_EL1_AMU, pfr0))
+        relm_arm64_set_trap_activity_monitors(&controls);
+
+    /*
+     * MDCR_EL2 protects debug/performance registers that we do not yet
+     * virtualize. TDA[9], TDRA[11], TDOSA[10] trap their respective debug
+     * register groups. TDE[8]=0 leaves ordinary guest debug exceptions
+     * (e.g. Linux userspace BRK -> SIGTRAP) to guest EL1. Register traps
+     * alone do not save/disable the host's active breakpoint/watchpoint
+     * banks; a proper host debug-state switch is still required.
+     */
+    relm_arm64_set_trap_debug_access(&controls);
+    relm_arm64_set_trap_debug_rom_address(&controls);
+    relm_arm64_set_trap_debug_os_access(&controls);
+    pmuver = FIELD_GET(ID_AA64DFR0_EL1_PMUVer, dfr0);
 
     vcpu->arch.ctrls = ctrls;
     return 0; 
@@ -120,6 +145,10 @@ static int arm64_vcpu_init(struct vcpu *vcpu)
 
     if (!vcpu || !vcpu->vm)
         return -EINVAL;
+
+    ret = relm_setup_guest_ctrls_vhe(vcpu); 
+    if(ret)
+        return ret; 
 
     ret = relm_setup_guest_state_aarch64(vcpu);
     if (ret)

@@ -356,4 +356,189 @@ static inline void relm_arm64_disable_force_broadcast(
     ctrls->hcr_el2 &= ~HCR_FB;
 } 
 
+/*
+ * TLOR[35] - Trap Limited Ordering Region register accesses. LOR controls
+ * memory ordering in configured regions. Set protects host LOR state
+ * from guest access; clear removes this interception. The caller must
+ * establish FEAT_LOR support before using this optional control.
+ */
+static inline void relm_arm64_set_trap_lor(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->hcr_el2 |= HCR_TLOR;
+}
+
+static inline void relm_arm64_clear_trap_lor(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->hcr_el2 &= ~HCR_TLOR;
+}
+
+/*
+ * TERR[36] - Trap RAS error-record accesses. Reliability, Availability
+ * and Serviceability registers describe hardware errors. Set intercepts
+ * covered guest accesses; clear removes the trap. Requires FEAT_RAS and
+ * is separate from AMO's routing of a physical SError exception.
+ */
+static inline void relm_arm64_set_trap_ras_error_records(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->hcr_el2 |= HCR_TERR;
+}
+
+static inline void relm_arm64_clear_trap_ras_error_records(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->hcr_el2 &= ~HCR_TERR;
+
+
+/*
+ * FPEN[21:20] - Floating-point/Advanced SIMD access control. Enable
+ * selects 11, permitting the Q-register/FPSR/FPCR switch in entry.S.
+ * Disable selects 00, trapping covered accesses at EL2 and below; do not
+ * install it while RELM's unconditional FP save/restore needs access.
+ * Guest Linux separately manages its EL1/EL0 policy through CPACR_EL1.
+ * These helpers do not save the host's FP bank or acquire its ownership.
+ */
+static inline void relm_arm64_enable_fp_simd(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->cptr_el2 =
+        (controls->cptr_el2 & ~CPTR_EL2_VHE_FPEN_MASK) |
+        CPTR_EL2_VHE_FPEN_MASK;
+}
+
+static inline void relm_arm64_disable_fp_simd(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->cptr_el2 &= ~CPTR_EL2_VHE_FPEN_MASK;
+}
+
+
+/*
+ * TTA[28, VHE] - Trap Trace Access. Set intercepts the implemented trace
+ * system-register interface so guest software cannot configure host
+ * tracing; clear removes this interception. Requires the trace interface.
+ * The non-VHE TTA field is at a different bit and is not used here.
+ */
+static inline void relm_arm64_set_trap_trace_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->cptr_el2 |= CPTR_EL2_VHE_TTA;
+}
+
+static inline void relm_arm64_clear_trap_trace_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->cptr_el2 &= ~CPTR_EL2_VHE_TTA;
+}
+
+
+/*
+ * TAM[30] - Trap Activity Monitors Unit accesses. When AMU exists, set
+ * intercepts guest activity-counter/control accesses; clear removes this
+ * trap. The physical activity counters remain a host resource unless
+ * RELM implements a guest model and the associated state handling.
+ */
+static inline void relm_arm64_set_trap_activity_monitors(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->cptr_el2 |= CPTR_EL2_TAM;
+}
+
+static inline void relm_arm64_clear_trap_activity_monitors(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->cptr_el2 &= ~CPTR_EL2_TAM;
+}
+
+/* MDCR_EL2 - Monitor Debug Configuration Register, EL2. */
+
+/*
+ * TDA[9] - Trap Debug register Accesses, including covered breakpoint and
+ * watchpoint controls. Set retains host control; clear removes this trap.
+ * Linux debug-exception delivery is separate (TDE). These helpers do not
+ * save/disable any already-active host breakpoint or watchpoint.
+ */
+static inline void relm_arm64_set_trap_debug_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 |= MDCR_EL2_TDA;
+}
+
+static inline void relm_arm64_clear_trap_debug_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 &= ~MDCR_EL2_TDA;
+}
+
+/*
+ * TDRA[11] - Trap Debug ROM Address access, MDRAR_EL1 in AArch64.
+ * Debug ROM tables describe discoverable debug components. Set keeps
+ * this guest discovery read under RELM policy; clear removes the trap.
+ */
+static inline void relm_arm64_set_trap_debug_rom_address(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 |= MDCR_EL2_TDRA;
+}
+
+static inline void relm_arm64_clear_trap_debug_rom_address(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 &= ~MDCR_EL2_TDRA;
+}
+
+/*
+ * TDOSA[10] - Trap Debug OS-related accesses: the applicable debug lock,
+ * status and power interfaces. Set intercepts guest debug management;
+ * clear removes this trap. Exact coverage depends on the implemented
+ * debug architecture, including any fine-grained trap controls.
+ */
+static inline void relm_arm64_set_trap_debug_os_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 |= MDCR_EL2_TDOSA;
+}
+
+static inline void relm_arm64_clear_trap_debug_os_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 &= ~MDCR_EL2_TDOSA;
+}
+
+/*
+ * TPM[6] - Trap Performance Monitor accesses. When a PMU exists, set
+ * intercepts the covered guest accesses (for example from Linux perf);
+ * clear removes this trap. Allowing access does not virtualize counters.
+ */
+static inline void relm_arm64_set_trap_pmu_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 |= MDCR_EL2_TPM;
+}
+
+static inline void relm_arm64_clear_trap_pmu_access(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 &= ~MDCR_EL2_TPM;
+}
+
+/*
+ * TPMCR[5] - Trap Performance Monitors Control Register, PMCR_EL0.
+ * Set intercepts guest PMU reset/enable controls; clear removes this
+ * separate trap. Call only when PMU support is established.
+ */
+static inline void relm_arm64_set_trap_pmu_control(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 |= MDCR_EL2_TPMCR;
+}
+
+static inline void relm_arm64_clear_trap_pmu_control(
+    struct relm_arm64_guest_controls *controls)
+{
+    controls->mdcr_el2 &= ~MDCR_EL2_TPMCR;
+}
+
 
